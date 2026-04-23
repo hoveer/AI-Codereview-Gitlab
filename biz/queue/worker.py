@@ -51,6 +51,7 @@ def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
         event_manager['push_reviewed'].send(PushReviewEntity(
             project_name=webhook_data['project']['name'],
             author=webhook_data['user_username'],
+            author_name=webhook_data.get('user_name', ''),
             branch=webhook_data.get('ref', '').replace('refs/heads/', ''),
             updated_at=int(datetime.now().timestamp()),  # 当前时间
             commits=commits,
@@ -145,6 +146,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             MergeRequestReviewEntity(
                 project_name=webhook_data['project']['name'],
                 author=webhook_data['user']['username'],
+                author_name=webhook_data['user'].get('name', ''),
                 source_branch=webhook_data['object_attributes']['source_branch'],
                 target_branch=webhook_data['object_attributes']['target_branch'],
                 updated_at=int(datetime.now().timestamp()),
@@ -201,6 +203,7 @@ def handle_github_push_event(webhook_data: dict, github_token: str, github_url: 
         event_manager['push_reviewed'].send(PushReviewEntity(
             project_name=webhook_data['repository']['name'],
             author=webhook_data['sender']['login'],
+            author_name=webhook_data.get('pusher', {}).get('name', ''),
             branch=webhook_data['ref'].replace('refs/heads/', ''),
             updated_at=int(datetime.now().timestamp()),  # 当前时间
             commits=commits,
@@ -285,6 +288,7 @@ def handle_github_pull_request_event(webhook_data: dict, github_token: str, gith
             MergeRequestReviewEntity(
                 project_name=webhook_data['repository']['name'],
                 author=webhook_data['pull_request']['user']['login'],
+                author_name=webhook_data['pull_request']['user'].get('name', ''),
                 source_branch=webhook_data['pull_request']['head']['ref'],
                 target_branch=webhook_data['pull_request']['base']['ref'],
                 updated_at=int(datetime.now().timestamp()),
@@ -342,6 +346,7 @@ def handle_gitea_push_event(webhook_data: dict, gitea_token: str, gitea_url: str
         event_manager['push_reviewed'].send(PushReviewEntity(
             project_name=repository.get('name'),
             author=sender.get('login') or sender.get('username'),
+            author_name=sender.get('full_name') or sender.get('login') or sender.get('username') or '',
             branch=handler.branch_name,
             updated_at=int(datetime.now().timestamp()),
             commits=commits,
@@ -418,6 +423,7 @@ def handle_gitea_pull_request_event(webhook_data: dict, gitea_token: str, gitea_
             MergeRequestReviewEntity(
                 project_name=repository.get('name'),
                 author=author_info.get('login') or author_info.get('username'),
+                author_name=author_info.get('full_name') or author_info.get('login') or author_info.get('username') or '',
                 source_branch=head_info.get('ref') or pull_request.get('head_branch', ''),
                 target_branch=base_info.get('ref') or pull_request.get('base_branch', ''),
                 updated_at=int(datetime.now().timestamp()),

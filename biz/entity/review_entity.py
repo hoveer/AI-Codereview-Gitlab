@@ -1,9 +1,10 @@
 class MergeRequestReviewEntity:
     def __init__(self, project_name: str, author: str, source_branch: str, target_branch: str, updated_at: int,
                  commits: list, score: float, url: str, review_result: str, url_slug: str, webhook_data: dict,
-                 additions: int, deletions: int, last_commit_id: str):
+                 additions: int, deletions: int, last_commit_id: str, author_name: str = ''):
         self.project_name = project_name
         self.author = author
+        self.author_name = author_name
         self.source_branch = source_branch
         self.target_branch = target_branch
         self.updated_at = updated_at
@@ -25,9 +26,11 @@ class MergeRequestReviewEntity:
 
 class PushReviewEntity:
     def __init__(self, project_name: str, author: str, branch: str, updated_at: int, commits: list, score: float,
-                 review_result: str, url_slug: str, webhook_data: dict, additions: int, deletions: int):
+                 review_result: str, url_slug: str, webhook_data: dict, additions: int, deletions: int,
+                 author_name: str = ''):
         self.project_name = project_name
         self.author = author
+        self.author_name = author_name
         self.branch = branch
         self.updated_at = updated_at
         self.commits = commits
