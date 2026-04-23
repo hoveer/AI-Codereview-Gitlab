@@ -19,6 +19,7 @@ class ReviewService:
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             project_name TEXT,
                             author TEXT,
+                            author_name TEXT,
                             source_branch TEXT,
                             target_branch TEXT,
                             updated_at INTEGER,
@@ -36,6 +37,7 @@ class ReviewService:
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             project_name TEXT,
                             author TEXT,
+                            author_name TEXT,
                             branch TEXT,
                             updated_at INTEGER,
                             commit_messages TEXT,
@@ -70,6 +72,13 @@ class ReviewService:
                         cursor.execute(f"ALTER TABLE mr_review_log ADD COLUMN {column.get('name')} {column.get('type')} "
                                        f"DEFAULT {column.get('default')}")
 
+                # 为旧版本的mr_review_log、push_review_log表添加author_name字段
+                for table in ["mr_review_log", "push_review_log"]:
+                    cursor.execute(f"PRAGMA table_info({table})")
+                    current_columns = [col[1] for col in cursor.fetchall()]
+                    if "author_name" not in current_columns:
+                        cursor.execute(f"ALTER TABLE {table} ADD COLUMN author_name TEXT DEFAULT NULL")
+
                 conn.commit()
                 # 添加时间字段索引（默认查询就需要时间范围）
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_push_review_log_updated_at ON '
@@ -85,12 +94,13 @@ class ReviewService:
             with sqlite3.connect(ReviewService.DB_FILE) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                                INSERT INTO mr_review_log (project_name,author, source_branch, target_branch, 
-                                updated_at, commit_messages, score, url,review_result, additions, deletions, 
+                                INSERT INTO mr_review_log (project_name, author, author_name, source_branch, target_branch, 
+                                updated_at, commit_messages, score, url, review_result, additions, deletions, 
                                 last_commit_id)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ''',
-                               (entity.project_name, entity.author, entity.source_branch,
+                               (entity.project_name, entity.author, entity.author_name or None,
+                                entity.source_branch,
                                 entity.target_branch, entity.updated_at, entity.commit_messages, entity.score,
                                 entity.url, entity.review_result, entity.additions, entity.deletions,
                                 entity.last_commit_id))
@@ -105,7 +115,8 @@ class ReviewService:
         try:
             with sqlite3.connect(ReviewService.DB_FILE) as conn:
                 query = """
-                            SELECT project_name, author, source_branch, target_branch, updated_at, commit_messages, score, url, review_result, additions, deletions
+                            SELECT project_name, author, COALESCE(NULLIF(author_name, ''), author) AS author_name,
+                            source_branch, target_branch, updated_at, commit_messages, score, url, review_result, additions, deletions
                             FROM mr_review_log
                             WHERE 1=1
                             """
@@ -113,7 +124,7 @@ class ReviewService:
 
                 if authors:
                     placeholders = ','.join(['?'] * len(authors))
-                    query += f" AND author IN ({placeholders})"
+                    query += f" AND COALESCE(NULLIF(author_name, ''), author) IN ({placeholders})"
                     params.extend(authors)
 
                 if project_names:
@@ -158,10 +169,11 @@ class ReviewService:
             with sqlite3.connect(ReviewService.DB_FILE) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                                INSERT INTO push_review_log (project_name,author, branch, updated_at, commit_messages, score,review_result, additions, deletions)
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                INSERT INTO push_review_log (project_name, author, author_name, branch, updated_at, commit_messages, score, review_result, additions, deletions)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ''',
-                               (entity.project_name, entity.author, entity.branch,
+                               (entity.project_name, entity.author, entity.author_name or None,
+                                entity.branch,
                                 entity.updated_at, entity.commit_messages, entity.score,
                                 entity.review_result, entity.additions, entity.deletions))
                 conn.commit()
@@ -176,7 +188,8 @@ class ReviewService:
             with sqlite3.connect(ReviewService.DB_FILE) as conn:
                 # 基础查询
                 query = """
-                    SELECT project_name, author, branch, updated_at, commit_messages, score, review_result, additions, deletions
+                    SELECT project_name, author, COALESCE(NULLIF(author_name, ''), author) AS author_name,
+                    branch, updated_at, commit_messages, score, review_result, additions, deletions
                     FROM push_review_log
                     WHERE 1=1
                 """
@@ -185,7 +198,7 @@ class ReviewService:
                 # 动态添加 authors 条件
                 if authors:
                     placeholders = ','.join(['?'] * len(authors))
-                    query += f" AND author IN ({placeholders})"
+                    query += f" AND COALESCE(NULLIF(author_name, ''), author) IN ({placeholders})"
                     params.extend(authors)
 
                 if project_names:

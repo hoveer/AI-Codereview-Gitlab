@@ -390,15 +390,15 @@ def generate_author_count_chart(df):
         return
 
     # 计算每个人员的提交数量
-    author_counts = df['author'].value_counts().reset_index()
-    author_counts.columns = ['author', 'count']
+    author_counts = df['author_name'].value_counts().reset_index()
+    author_counts.columns = ['author_name', 'count']
 
     # 生成颜色列表，每个项目一个颜色
     colors = plt.colormaps['Paired'].resampled(len(author_counts))
     # 显示提交数量柱状图
     fig1, ax1 = plt.subplots(figsize=(10, 6))
     ax1.bar(
-        author_counts['author'],
+        author_counts['author_name'],
         author_counts['count'],
         color=[colors(i) for i in range(len(author_counts))]
     )
@@ -416,15 +416,15 @@ def generate_author_score_chart(df):
         return
 
     # 计算每个人员的平均分数
-    author_scores = df.groupby('author')['score'].mean().reset_index()
-    author_scores.columns = ['author', 'average_score']
+    author_scores = df.groupby('author_name')['score'].mean().reset_index()
+    author_scores.columns = ['author_name', 'average_score']
 
     # 显示平均分数柱状图
     fig2, ax2 = plt.subplots(figsize=(10, 6))
     # 生成颜色列表，每个项目一个颜色
     colors = plt.colormaps['Pastel1'].resampled(len(author_scores))
     ax2.bar(
-        author_scores['author'],
+        author_scores['author_name'],
         author_scores['average_score'],
         color=[colors(i) for i in range(len(author_scores))]
     )
@@ -444,19 +444,19 @@ def generate_author_code_line_chart(df):
         st.warning("无法生成代码行数图表：缺少必要的数据列")
         return
         # 计算每个人员的代码行数
-    author_code_lines_add = df.groupby('author')['additions'].sum().reset_index()
-    author_code_lines_add.columns = ['author', 'additions']
-    author_code_lines_del = df.groupby('author')['deletions'].sum().reset_index()
-    author_code_lines_del.columns = ['author', 'deletions']
+    author_code_lines_add = df.groupby('author_name')['additions'].sum().reset_index()
+    author_code_lines_add.columns = ['author_name', 'additions']
+    author_code_lines_del = df.groupby('author_name')['deletions'].sum().reset_index()
+    author_code_lines_del.columns = ['author_name', 'deletions']
     # 显示代码行数柱状图
     fig3, ax3 = plt.subplots(figsize=(10, 6))
     ax3.bar(
-        author_code_lines_add['author'],
+        author_code_lines_add['author_name'],
         author_code_lines_add['additions'],
         color=(0.7, 1, 0.7)
     )
     ax3.bar(
-        author_code_lines_del['author'],
+        author_code_lines_del['author_name'],
         -author_code_lines_del['deletions'],
         color=(1, 0.7, 0.7)
     )
@@ -530,7 +530,7 @@ def main_page():
                             updated_at_lte=int(end_datetime.timestamp()), columns=columns)
             df = pd.DataFrame(data)
 
-            unique_authors = sorted(df["author"].dropna().unique().tolist()) if not df.empty else []
+            unique_authors = sorted(df["author_name"].dropna().unique().tolist()) if not df.empty else []
             unique_projects = sorted(df["project_name"].dropna().unique().tolist()) if not df.empty else []
             with col3:
                 authors = st.multiselect("开发者", unique_authors, default=[], key=f"{tab}_authors")
@@ -581,13 +581,14 @@ def main_page():
                     st.info("无法显示代码行数图表：缺少必要的数据列")
 
     # Merge Request 数据展示
-    mr_columns = ["project_name", "author", "source_branch", "target_branch", "updated_at", "commit_messages", "delta",
+    mr_columns = ["project_name", "author_name", "author", "source_branch", "target_branch", "updated_at", "commit_messages", "delta",
                   "score",
                   "url", 'additions', 'deletions']
 
     mr_column_config = {
         "project_name": "项目名称",
-        "author": "开发者",
+        "author_name": "开发者",
+        "author": None,
         "source_branch": "源分支",
         "target_branch": "目标分支",
         "updated_at": "更新时间",
@@ -611,12 +612,13 @@ def main_page():
 
     # Push 数据展示
     if show_push_tab:
-        push_columns = ["project_name", "author", "branch", "updated_at", "commit_messages", "delta", "score",
+        push_columns = ["project_name", "author_name", "author", "branch", "updated_at", "commit_messages", "delta", "score",
                         'additions', 'deletions']
 
         push_column_config = {
             "project_name": "项目名称",
-            "author": "开发者",
+            "author_name": "开发者",
+            "author": None,
             "branch": "分支",
             "updated_at": "更新时间",
             "commit_messages": "提交信息",
