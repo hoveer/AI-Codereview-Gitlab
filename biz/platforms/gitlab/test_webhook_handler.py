@@ -84,7 +84,7 @@ class TestParseBotMention(TestCase):
         # 去掉 @bot 之后剩余文本中应包含 "请 review"
         self.assertIn("请 review", extra)
 
-    def test_no_word_boundary_false_positive(self):
+    def test_partial_username_match_not_detected(self):
         """@botuser 不应匹配 bot"""
         is_mentioned, extra = parse_bot_mention("@botuser hello", "bot")
         self.assertFalse(is_mentioned)

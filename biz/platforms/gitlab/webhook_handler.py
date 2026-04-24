@@ -398,7 +398,7 @@ class NoteHandler:
         logger.debug(f"NoteHandler get MR changes: {response.status_code}, URL: {url}")
         if response.status_code == 200:
             return response.json().get('changes', [])
-        logger.warn(f"Failed to get MR changes: {response.status_code}, {response.text}")
+        logger.warning(f"Failed to get MR changes: {response.status_code}, {response.text}")
         return []
 
     def get_merge_request_commits(self) -> list:
@@ -415,7 +415,7 @@ class NoteHandler:
         logger.debug(f"NoteHandler get MR commits: {response.status_code}")
         if response.status_code == 200:
             return response.json()
-        logger.warn(f"Failed to get MR commits: {response.status_code}, {response.text}")
+        logger.warning(f"Failed to get MR commits: {response.status_code}, {response.text}")
         return []
 
     def add_merge_request_note(self, body: str):
