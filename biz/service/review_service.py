@@ -163,6 +163,24 @@ class ReviewService:
             return False
 
     @staticmethod
+    def get_last_mr_review_commit_id(project_name: str, source_branch: str, target_branch: str) -> str:
+        """获取最近一次 MR 审核记录的 last_commit_id，若无则返回空字符串"""
+        try:
+            with sqlite3.connect(ReviewService.DB_FILE) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT last_commit_id FROM mr_review_log
+                    WHERE project_name = ? AND source_branch = ? AND target_branch = ?
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                ''', (project_name, source_branch, target_branch))
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else ''
+        except sqlite3.DatabaseError as e:
+            print(f"Error getting last mr review commit id: {e}")
+            return ''
+
+    @staticmethod
     def insert_push_review_log(entity: PushReviewEntity):
         """插入推送审核日志"""
         try:

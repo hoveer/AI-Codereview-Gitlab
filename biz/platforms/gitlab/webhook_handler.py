@@ -172,6 +172,19 @@ class MergeRequestHandler:
             logger.error(f"Failed to add note: {response.status_code}")
             logger.error(response.text)
 
+    def repository_compare(self, from_sha: str, to_sha: str) -> list:
+        """通过 compare API 获取两个提交之间的差异"""
+        url = (urljoin(f"{self.gitlab_url}/",
+                       f"api/v4/projects/{self.project_id}/repository/compare")
+               + f"?from={from_sha}&to={to_sha}")
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(url, headers=headers, verify=False)
+        logger.debug(f"MergeRequestHandler repository compare: {response.status_code}, URL: {url}")
+        if response.status_code == 200:
+            return response.json().get('diffs', [])
+        logger.warning(f"Failed to compare: {response.status_code}, {response.text}")
+        return []
+
     def target_branch_protected(self) -> bool:
         url = urljoin(f"{self.gitlab_url}/",
                       f"api/v4/projects/{self.project_id}/protected_branches")
@@ -368,6 +381,9 @@ class NoteHandler:
         self.merge_request_iid = None
         self.discussion_id = None
         self.action = None
+        self.source_branch = ''
+        self.target_branch = ''
+        self.last_commit_id = ''
         self._parse()
 
     def _parse(self):
@@ -385,6 +401,9 @@ class NoteHandler:
         if self.noteable_type == 'MergeRequest':
             mr = self.webhook_data.get('merge_request', {})
             self.merge_request_iid = mr.get('iid')
+            self.source_branch = mr.get('source_branch', '')
+            self.target_branch = mr.get('target_branch', '')
+            self.last_commit_id = mr.get('last_commit', {}).get('id', '')
 
     def get_merge_request_changes(self) -> list:
         """获取关联 MR 的代码变更列表（仅当 noteable_type 为 MergeRequest 时有效）"""
@@ -418,6 +437,21 @@ class NoteHandler:
         if response.status_code == 200:
             return response.json()
         logger.warning(f"Failed to get MR commits: {response.status_code}, {response.text}")
+        return []
+
+    def repository_compare(self, from_sha: str, to_sha: str) -> list:
+        """通过 compare API 获取两个提交之间的差异"""
+        if self.noteable_type != 'MergeRequest' or not self.project_id:
+            return []
+        url = (urljoin(f"{self.gitlab_url}/",
+                       f"api/v4/projects/{self.project_id}/repository/compare")
+               + f"?from={from_sha}&to={to_sha}")
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(url, headers=headers, verify=False)
+        logger.debug(f"NoteHandler repository compare: {response.status_code}, URL: {url}")
+        if response.status_code == 200:
+            return response.json().get('diffs', [])
+        logger.warning(f"NoteHandler failed to compare: {response.status_code}, {response.text}")
         return []
 
     def add_merge_request_note(self, body: str):
