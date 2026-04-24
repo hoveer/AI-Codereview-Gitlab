@@ -122,6 +122,12 @@ class MrChatReviewer(BaseReviewer):
         :param commits_text: MR 提交信息（可为空）
         :return: AI 生成的回复文本
         """
+        # 与 CodeReviewer.review_and_strip_code 保持一致，超出 REVIEW_MAX_TOKENS 则截断 diffs_text
+        if diffs_text:
+            review_max_tokens = int(os.getenv("REVIEW_MAX_TOKENS", 10000))
+            if count_tokens(diffs_text) > review_max_tokens:
+                diffs_text = truncate_text_by_tokens(diffs_text, review_max_tokens)
+
         messages = [
             self.prompts["system_message"],
             {
