@@ -3,6 +3,7 @@
 # @Time    : 2025/3/18 17:58
 # @Author  : Arrow
 from unittest import TestCase, main
+from unittest.mock import patch, MagicMock
 
 from biz.platforms.gitlab.webhook_handler import PushHandler, NoteHandler, parse_bot_mention
 
@@ -132,6 +133,38 @@ class TestNoteHandler(TestCase):
         self.assertIsNone(handler.project_id)
         self.assertEqual(handler.note, '')
         self.assertIsNone(handler.merge_request_iid)
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.post')
+    def test_add_note_replies_in_discussion_thread(self, mock_post):
+        """当 discussion_id 存在时，应使用讨论回复接口"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.text = ''
+        mock_post.return_value = mock_resp
+
+        data = self._make_webhook_data()  # discussion_id='abc123'
+        handler = NoteHandler(data, 'token', 'https://gitlab.example.com')
+        handler.add_merge_request_note('test reply')
+
+        called_url = mock_post.call_args[0][0]
+        self.assertIn('/discussions/abc123/notes', called_url)
+        self.assertNotIn('/merge_requests/1/notes', called_url.replace('/discussions/', ''))
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.post')
+    def test_add_note_falls_back_to_top_level_when_no_discussion(self, mock_post):
+        """当 discussion_id 为空时，应退回到顶层 MR notes 接口"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.text = ''
+        mock_post.return_value = mock_resp
+
+        data = self._make_webhook_data()
+        data['object_attributes']['discussion_id'] = None
+        handler = NoteHandler(data, 'token', 'https://gitlab.example.com')
+        handler.add_merge_request_note('top-level note')
+
+        called_url = mock_post.call_args[0][0]
+        self.assertTrue(called_url.endswith('/merge_requests/1/notes'))
 
 
 if __name__ == '__main__':

@@ -419,15 +419,26 @@ class NoteHandler:
         return []
 
     def add_merge_request_note(self, body: str):
-        """向关联 MR 添加评论"""
+        """向关联 MR 添加评论。
+
+        若存在 discussion_id，则通过讨论回复接口将回复追加到对应的讨论线程中；
+        否则创建新的顶层 MR 评论。
+        """
         if not self.merge_request_iid:
             logger.error("NoteHandler: merge_request_iid is not set, cannot add note.")
             return
 
-        url = urljoin(
-            f"{self.gitlab_url}/",
-            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes"
-        )
+        if self.discussion_id:
+            url = urljoin(
+                f"{self.gitlab_url}/",
+                f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}"
+                f"/discussions/{self.discussion_id}/notes"
+            )
+        else:
+            url = urljoin(
+                f"{self.gitlab_url}/",
+                f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes"
+            )
         headers = {
             'Private-Token': self.gitlab_token,
             'Content-Type': 'application/json'
