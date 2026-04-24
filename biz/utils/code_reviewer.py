@@ -106,3 +106,35 @@ class CodeReviewer(BaseReviewer):
         match = re.search(r"总分[:：]\s*(\d+)分?", review_text)
         return int(match.group(1)) if match else 0
 
+
+class MrChatReviewer(BaseReviewer):
+    """MR 评论中 @机器人 + 额外文本 时的对话式 AI 回复"""
+
+    def __init__(self):
+        super().__init__("mr_comment_chat_prompt")
+
+    def chat(self, user_question: str, diffs_text: str = "", commits_text: str = "") -> str:
+        """
+        根据用户问题和 MR 上下文生成对话式回复。
+
+        :param user_question: 用户在评论中 @机器人 后的附加文本
+        :param diffs_text: MR 代码变更（可为空）
+        :param commits_text: MR 提交信息（可为空）
+        :return: AI 生成的回复文本
+        """
+        messages = [
+            self.prompts["system_message"],
+            {
+                "role": "user",
+                "content": self.prompts["user_message"]["content"].format(
+                    user_question=user_question,
+                    diffs_text=diffs_text,
+                    commits_text=commits_text,
+                ),
+            },
+        ]
+        result = self.call_llm(messages).strip()
+        if result.startswith("```markdown") and result.endswith("```"):
+            return result[11:-3].strip()
+        return result
+
