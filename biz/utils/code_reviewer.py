@@ -36,6 +36,8 @@ class BaseReviewer(abc.ABC):
                 return {
                     "system_message": {"role": "system", "content": system_prompt},
                     "user_message": {"role": "user", "content": user_prompt},
+                    "user_prompt_raw": prompts["user_prompt"],
+                    "style": style,
                 }
         except (FileNotFoundError, KeyError, yaml.YAMLError) as e:
             logger.error(f"加载提示词配置失败: {e}")
@@ -113,6 +115,9 @@ class MrChatReviewer(BaseReviewer):
     def __init__(self):
         super().__init__("mr_comment_chat_prompt")
 
+    def review_code(self, *args, **kwargs) -> str:
+        raise NotImplementedError("MrChatReviewer uses chat() instead of review_code()")
+
     def chat(self, user_question: str, diffs_text: str = "", commits_text: str = "") -> str:
         """
         根据用户问题和 MR 上下文生成对话式回复。
@@ -132,7 +137,11 @@ class MrChatReviewer(BaseReviewer):
             self.prompts["system_message"],
             {
                 "role": "user",
-                "content": self.prompts["user_message"]["content"].format(
+                "content": Template(self.prompts["user_prompt_raw"]).render(
+                    style=self.prompts["style"],
+                    diffs_text=diffs_text,
+                    commits_text=commits_text,
+                ).format(
                     user_question=user_question,
                     diffs_text=diffs_text,
                     commits_text=commits_text,
