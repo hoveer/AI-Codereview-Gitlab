@@ -4,12 +4,12 @@ from datetime import datetime
 
 from biz.entity.review_entity import MergeRequestReviewEntity, PushReviewEntity
 from biz.event.event_manager import event_manager
-from biz.platforms.gitlab.webhook_handler import filter_changes, MergeRequestHandler, PushHandler
+from biz.platforms.gitlab.webhook_handler import filter_changes, MergeRequestHandler, PushHandler, NoteHandler, parse_bot_mention
 from biz.platforms.github.webhook_handler import filter_changes as filter_github_changes, PullRequestHandler as GithubPullRequestHandler, PushHandler as GithubPushHandler
 from biz.platforms.gitea.webhook_handler import filter_changes as filter_gitea_changes, PullRequestHandler as GiteaPullRequestHandler, \
     PushHandler as GiteaPushHandler
 from biz.service.review_service import ReviewService
-from biz.utils.code_reviewer import CodeReviewer
+from biz.utils.code_reviewer import CodeReviewer, MrChatReviewer
 from biz.utils.im import notifier
 from biz.utils.log import logger
 
@@ -79,18 +79,19 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
     :return:
     '''
     merge_review_only_protected_branches = os.environ.get('MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED', '0') == '1'
+    draft_mr_review_enabled = os.environ.get('DRAFT_MR_REVIEW_ENABLED', '0') == '1'
     try:
         # 解析Webhook数据
         handler = MergeRequestHandler(webhook_data, gitlab_token, gitlab_url)
         logger.info('Merge Request Hook event received')
 
-        # 新增：判断是否为draft（草稿）MR
+        # 判断是否为draft（草稿）MR，默认跳过草稿MR的审查
         object_attributes = webhook_data.get('object_attributes', {})
         is_draft = object_attributes.get('draft') or object_attributes.get('work_in_progress')
-        if is_draft:
+        if is_draft and not draft_mr_review_enabled:
             msg = f"[通知] MR为草稿（draft），未触发AI审查。\n项目: {webhook_data['project']['name']}\n作者: {webhook_data['user']['username']}\n源分支: {object_attributes.get('source_branch')}\n目标分支: {object_attributes.get('target_branch')}\n链接: {object_attributes.get('url')}"
             notifier.send_notification(content=msg)
-            logger.info("MR为draft，仅发送通知，不触发AI review。")
+            logger.info("MR为draft，仅发送通知，不触发AI review。如需对draft MR触发审查，请设置DRAFT_MR_REVIEW_ENABLED=1。")
             return
 
         # 如果开启了仅review projected branches的，判断当前目标分支是否为projected branches
@@ -166,6 +167,81 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         error_message = f'AI Code Review 服务出现未知错误: {str(e)}\n{traceback.format_exc()}'
         notifier.send_notification(content=error_message)
         logger.error('出现未知错误: %s', error_message)
+
+
+def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gitlab_url_slug: str):
+    """
+    处理 GitLab note（评论）Webhook 事件，支持 @机器人 交互：
+    - 仅 @机器人 => 触发 MR 代码审查
+    - @机器人 + 额外文本 => 对话式 AI 回复
+    """
+    bot_username = os.environ.get('GITLAB_BOT_USERNAME', '').strip()
+    if not bot_username:
+        logger.info("GITLAB_BOT_USERNAME not configured, note event ignored.")
+        return
+
+    try:
+        handler = NoteHandler(webhook_data, gitlab_token, gitlab_url)
+        logger.info('Note Hook event received')
+
+        # 目前仅处理 MR 上的评论
+        if handler.noteable_type != 'MergeRequest':
+            logger.info(f"Note event noteable_type={handler.noteable_type}, only MergeRequest notes are handled.")
+            return
+
+        if not handler.merge_request_iid:
+            logger.info("Note event: merge_request_iid not found, ignored.")
+            return
+
+        # 仅处理新建评论（action == 'create'），忽略编辑等其他操作，避免重复触发 AI 工作流
+        if handler.action and handler.action != 'create':
+            logger.info(f"Note event action={handler.action!r}, only 'create' actions are handled.")
+            return
+
+        note_body = handler.note or ''
+        is_mentioned, extra_text = parse_bot_mention(note_body, bot_username)
+
+        if not is_mentioned:
+            logger.info("Note event: bot not mentioned, ignored.")
+            return
+
+        if not extra_text:
+            # 仅 @机器人，触发代码审查
+            logger.info("Note event: bot mentioned without extra text, triggering code review.")
+
+            changes = handler.get_merge_request_changes()
+            changes = filter_changes(changes)
+            if not changes:
+                logger.info('Note event review: 未检测到有关代码的修改。')
+                handler.add_merge_request_note('关注的文件没有修改，无需 Review。')
+                return
+
+            commits = handler.get_merge_request_commits()
+            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
+            handler.add_merge_request_note(f'Auto Review Result: \n{review_result}')
+        else:
+            # @机器人 + 额外文本，走对话式回复
+            logger.info(f"Note event: bot mentioned with extra text, generating chat reply. question={extra_text!r}")
+
+            changes = handler.get_merge_request_changes()
+            changes = filter_changes(changes)
+            commits = handler.get_merge_request_commits()
+            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            diffs_text = str(changes) if changes else ''
+
+            reply = MrChatReviewer().chat(
+                user_question=extra_text,
+                diffs_text=diffs_text,
+                commits_text=commits_text,
+            )
+            handler.add_merge_request_note(reply)
+
+    except Exception as e:
+        error_message = f'AI Code Review note 事件处理出现未知错误: {str(e)}\n{traceback.format_exc()}'
+        notifier.send_notification(content=error_message)
+        logger.error('出现未知错误: %s', error_message)
+
 
 def handle_github_push_event(webhook_data: dict, github_token: str, github_url: str, github_url_slug: str):
     push_review_enabled = os.environ.get('PUSH_REVIEW_ENABLED', '0') == '1'

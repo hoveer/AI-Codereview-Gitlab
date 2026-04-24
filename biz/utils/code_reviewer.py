@@ -36,6 +36,8 @@ class BaseReviewer(abc.ABC):
                 return {
                     "system_message": {"role": "system", "content": system_prompt},
                     "user_message": {"role": "user", "content": user_prompt},
+                    "user_prompt_raw": prompts["user_prompt"],
+                    "style": style,
                 }
         except (FileNotFoundError, KeyError, yaml.YAMLError) as e:
             logger.error(f"加载提示词配置失败: {e}")
@@ -105,4 +107,49 @@ class CodeReviewer(BaseReviewer):
             return 0
         match = re.search(r"总分[:：]\s*(\d+)分?", review_text)
         return int(match.group(1)) if match else 0
+
+
+class MrChatReviewer(BaseReviewer):
+    """MR 评论中 @机器人 + 额外文本 时的对话式 AI 回复"""
+
+    def __init__(self):
+        super().__init__("mr_comment_chat_prompt")
+
+    def review_code(self, *args, **kwargs) -> str:
+        raise NotImplementedError("MrChatReviewer uses chat() instead of review_code()")
+
+    def chat(self, user_question: str, diffs_text: str = "", commits_text: str = "") -> str:
+        """
+        根据用户问题和 MR 上下文生成对话式回复。
+
+        :param user_question: 用户在评论中 @机器人 后的附加文本
+        :param diffs_text: MR 代码变更（可为空）
+        :param commits_text: MR 提交信息（可为空）
+        :return: AI 生成的回复文本
+        """
+        # 与 CodeReviewer.review_and_strip_code 保持一致，超出 REVIEW_MAX_TOKENS 则截断 diffs_text
+        if diffs_text:
+            review_max_tokens = int(os.getenv("REVIEW_MAX_TOKENS", 10000))
+            if count_tokens(diffs_text) > review_max_tokens:
+                diffs_text = truncate_text_by_tokens(diffs_text, review_max_tokens)
+
+        messages = [
+            self.prompts["system_message"],
+            {
+                "role": "user",
+                "content": Template(self.prompts["user_prompt_raw"]).render(
+                    style=self.prompts["style"],
+                    diffs_text=diffs_text,
+                    commits_text=commits_text,
+                ).format(
+                    user_question=user_question,
+                    diffs_text=diffs_text,
+                    commits_text=commits_text,
+                ),
+            },
+        ]
+        result = self.call_llm(messages).strip()
+        if result.startswith("```markdown") and result.endswith("```"):
+            return result[11:-3].strip()
+        return result
 

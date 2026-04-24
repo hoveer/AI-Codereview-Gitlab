@@ -8,6 +8,31 @@ import requests
 from biz.utils.log import logger
 
 
+def parse_bot_mention(note_body: str, bot_username: str):
+    """
+    解析评论内容，判断是否 @ 了机器人，并提取附加文本。
+
+    :param note_body: 评论的正文内容
+    :param bot_username: 机器人在 GitLab 中的用户名（不含 @）
+    :return: (is_mentioned, extra_text)
+             is_mentioned: 是否提及了机器人
+             extra_text: 去掉 @机器人 mention 后的剩余文本（去除首尾空白），
+                         如果仅包含 mention 则为空字符串
+    """
+    if not note_body or not bot_username:
+        return False, ""
+
+    # 构造 mention 的正则，不区分大小写，支持 @username 形式
+    pattern = re.compile(r'@' + re.escape(bot_username) + r'\b', re.IGNORECASE)
+
+    if not pattern.search(note_body):
+        return False, ""
+
+    # 去掉所有 @bot_username mention，保留剩余文本
+    extra_text = pattern.sub('', note_body).strip()
+    return True, extra_text
+
+
 def filter_changes(changes: list):
     '''
     过滤数据，只保留支持的文件类型以及必要的字段信息
@@ -328,3 +353,103 @@ class PushHandler:
             # 正常的提交范围比较 - 使用compare API
             logger.info(f"Comparing commits from {before} to {after}")
             return self.repository_compare(before, after)
+
+
+class NoteHandler:
+    """处理 GitLab note（评论）Webhook 事件"""
+
+    def __init__(self, webhook_data: dict, gitlab_token: str, gitlab_url: str):
+        self.webhook_data = webhook_data
+        self.gitlab_token = gitlab_token
+        self.gitlab_url = gitlab_url
+        self.project_id = None
+        self.note = None
+        self.noteable_type = None
+        self.merge_request_iid = None
+        self.discussion_id = None
+        self.action = None
+        self._parse()
+
+    def _parse(self):
+        """从 webhook payload 解析关键字段"""
+        self.project_id = (
+            self.webhook_data.get('project_id')
+            or self.webhook_data.get('project', {}).get('id')
+        )
+        object_attributes = self.webhook_data.get('object_attributes', {})
+        self.note = object_attributes.get('note', '')
+        self.noteable_type = object_attributes.get('noteable_type', '')
+        self.discussion_id = object_attributes.get('discussion_id')
+        self.action = object_attributes.get('action', '')
+
+        if self.noteable_type == 'MergeRequest':
+            mr = self.webhook_data.get('merge_request', {})
+            self.merge_request_iid = mr.get('iid')
+
+    def get_merge_request_changes(self) -> list:
+        """获取关联 MR 的代码变更列表（仅当 noteable_type 为 MergeRequest 时有效）"""
+        if self.noteable_type != 'MergeRequest' or not self.merge_request_iid:
+            return []
+
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/changes?access_raw_diffs=true"
+        )
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(url, headers=headers, verify=False)
+        logger.debug(f"NoteHandler get MR changes: {response.status_code}, URL: {url}")
+        if response.status_code == 200:
+            return response.json().get('changes', [])
+        logger.warning(f"Failed to get MR changes: {response.status_code}, {response.text}")
+        return []
+
+    def get_merge_request_commits(self) -> list:
+        """获取关联 MR 的提交列表"""
+        if self.noteable_type != 'MergeRequest' or not self.merge_request_iid:
+            return []
+
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/commits"
+        )
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(url, headers=headers, verify=False)
+        logger.debug(f"NoteHandler get MR commits: {response.status_code}")
+        if response.status_code == 200:
+            return response.json()
+        logger.warning(f"Failed to get MR commits: {response.status_code}, {response.text}")
+        return []
+
+    def add_merge_request_note(self, body: str):
+        """向关联 MR 添加评论。
+
+        若存在 discussion_id，则通过讨论回复接口将回复追加到对应的讨论线程中；
+        否则创建新的顶层 MR 评论。
+        """
+        if not self.merge_request_iid:
+            logger.error("NoteHandler: merge_request_iid is not set, cannot add note.")
+            return
+
+        if self.discussion_id:
+            url = urljoin(
+                f"{self.gitlab_url}/",
+                f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}"
+                f"/discussions/{self.discussion_id}/notes"
+            )
+        else:
+            url = urljoin(
+                f"{self.gitlab_url}/",
+                f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes"
+            )
+        headers = {
+            'Private-Token': self.gitlab_token,
+            'Content-Type': 'application/json'
+        }
+        data = {'body': body}
+        response = requests.post(url, headers=headers, json=data, verify=False)
+        logger.debug(f"NoteHandler add MR note: {response.status_code}, {response.text}")
+        if response.status_code == 201:
+            logger.info("NoteHandler: Note successfully added to merge request.")
+        else:
+            logger.error(f"NoteHandler: Failed to add note: {response.status_code}, {response.text}")
+
