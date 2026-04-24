@@ -79,18 +79,19 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
     :return:
     '''
     merge_review_only_protected_branches = os.environ.get('MERGE_REVIEW_ONLY_PROTECTED_BRANCHES_ENABLED', '0') == '1'
+    draft_mr_review_enabled = os.environ.get('DRAFT_MR_REVIEW_ENABLED', '0') == '1'
     try:
         # 解析Webhook数据
         handler = MergeRequestHandler(webhook_data, gitlab_token, gitlab_url)
         logger.info('Merge Request Hook event received')
 
-        # 新增：判断是否为draft（草稿）MR
+        # 判断是否为draft（草稿）MR，默认跳过草稿MR的审查
         object_attributes = webhook_data.get('object_attributes', {})
         is_draft = object_attributes.get('draft') or object_attributes.get('work_in_progress')
-        if is_draft:
+        if is_draft and not draft_mr_review_enabled:
             msg = f"[通知] MR为草稿（draft），未触发AI审查。\n项目: {webhook_data['project']['name']}\n作者: {webhook_data['user']['username']}\n源分支: {object_attributes.get('source_branch')}\n目标分支: {object_attributes.get('target_branch')}\n链接: {object_attributes.get('url')}"
             notifier.send_notification(content=msg)
-            logger.info("MR为draft，仅发送通知，不触发AI review。")
+            logger.info("MR为draft，仅发送通知，不触发AI review。如需对draft MR触发审查，请设置DRAFT_MR_REVIEW_ENABLED=1。")
             return
 
         # 如果开启了仅review projected branches的，判断当前目标分支是否为projected branches
