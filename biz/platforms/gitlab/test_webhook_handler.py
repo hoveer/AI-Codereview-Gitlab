@@ -120,6 +120,26 @@ class TestNoteHandler(TestCase):
         self.assertEqual(handler.merge_request_iid, 1)
         self.assertEqual(handler.note, '@bot review')
 
+    def test_parse_note_action_create(self):
+        """note payload 含 action='create' 时应正确解析"""
+        data = self._make_webhook_data()
+        data['object_attributes']['action'] = 'create'
+        handler = NoteHandler(data, '', '')
+        self.assertEqual(handler.action, 'create')
+
+    def test_parse_note_action_update(self):
+        """note payload 含 action='update' 时应正确解析"""
+        data = self._make_webhook_data()
+        data['object_attributes']['action'] = 'update'
+        handler = NoteHandler(data, '', '')
+        self.assertEqual(handler.action, 'update')
+
+    def test_parse_note_action_missing(self):
+        """note payload 不含 action 时 action 应为空字符串"""
+        data = self._make_webhook_data()
+        handler = NoteHandler(data, '', '')
+        self.assertEqual(handler.action, '')
+
     def test_parse_non_mr_note(self):
         """非 MR 类型的 note 不应设置 merge_request_iid"""
         data = self._make_webhook_data(noteable_type='Commit')

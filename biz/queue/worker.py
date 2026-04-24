@@ -192,6 +192,11 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             logger.info("Note event: merge_request_iid not found, ignored.")
             return
 
+        # 仅处理新建评论（action == 'create'），忽略编辑等其他操作，避免重复触发 AI 工作流
+        if handler.action and handler.action != 'create':
+            logger.info(f"Note event action={handler.action!r}, only 'create' actions are handled.")
+            return
+
         note_body = handler.note or ''
         is_mentioned, extra_text = parse_bot_mention(note_body, bot_username)
 

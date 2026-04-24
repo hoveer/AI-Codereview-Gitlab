@@ -367,6 +367,7 @@ class NoteHandler:
         self.noteable_type = None
         self.merge_request_iid = None
         self.discussion_id = None
+        self.action = None
         self._parse()
 
     def _parse(self):
@@ -379,6 +380,7 @@ class NoteHandler:
         self.note = object_attributes.get('note', '')
         self.noteable_type = object_attributes.get('noteable_type', '')
         self.discussion_id = object_attributes.get('discussion_id')
+        self.action = object_attributes.get('action', '')
 
         if self.noteable_type == 'MergeRequest':
             mr = self.webhook_data.get('merge_request', {})
