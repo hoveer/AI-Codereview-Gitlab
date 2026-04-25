@@ -211,12 +211,17 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         try:
             review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
         except Exception:
-            # 清理 eyes 后重新抛出，避免 eyes 永久停留
-            if placeholder_note_id and placeholder_eyes_added:
+            # 清理占位评论及 eyes 表情，避免"审核中"状态永久停留
+            if placeholder_note_id:
                 try:
-                    handler.remove_note_award_emoji(placeholder_note_id, "eyes")
+                    handler.update_mr_note(placeholder_note_id, "⚠️ AI审核未能完成，请稍后重试。")
                 except Exception as _e:
-                    logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
+                    logger.warning(f"Failed to update placeholder note during error cleanup: {_e}")
+                if placeholder_eyes_added:
+                    try:
+                        handler.remove_note_award_emoji(placeholder_note_id, "eyes")
+                    except Exception as _e:
+                        logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
             raise
 
         # 将review结果写入占位评论（编辑），失败则回退为新建评论
