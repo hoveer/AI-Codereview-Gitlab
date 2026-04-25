@@ -207,6 +207,79 @@ class MergeRequestHandler:
             logger.warn(f"Failed to get protected branches: {response.status_code}, {response.text}")
             return False
 
+    # 低分阻止合并讨论的稳定标识，用于去重检测
+    _LOW_SCORE_BLOCK_MARKER = '<!-- LOW_SCORE_BLOCK_MR -->'
+
+    def get_mr_discussions(self) -> list:
+        """获取当前 MR 的所有讨论列表（分页获取全部）"""
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/discussions"
+        )
+        headers = {'Private-Token': self.gitlab_token}
+        result = []
+        page = 1
+        while True:
+            response = requests.get(url, headers=headers, params={'page': page, 'per_page': 100}, verify=False)
+            if response.status_code != 200:
+                logger.warning(f"Failed to get MR discussions: {response.status_code}, {response.text}")
+                break
+            data = response.json()
+            if not data:
+                break
+            result.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+        return result
+
+    def create_low_score_block_discussion(self, score: int, threshold: int) -> bool:
+        """若当前 MR 不存在未解决的低分阻塞讨论，则创建一个。
+
+        Returns True if a new discussion was created, False if skipped or failed.
+        """
+        # 去重：检查是否已存在未解决的低分阻塞讨论
+        try:
+            discussions = self.get_mr_discussions()
+            for discussion in discussions:
+                notes = discussion.get('notes', [])
+                if not notes:
+                    continue
+                first_note_body = notes[0].get('body', '')
+                if self._LOW_SCORE_BLOCK_MARKER in first_note_body and not discussion.get('resolved', False):
+                    logger.info("Low-score blocking discussion already exists and is unresolved, skipping creation.")
+                    return False
+        except Exception as e:
+            logger.warning(f"Failed to check existing blocking discussions: {e}")
+
+        # 创建新的未解决低分阻塞讨论
+        body = (
+            f"⚠️ AI代码审查评分过低，已触发阻止合并机制。\n\n"
+            f"- 当前评分：{score}分\n"
+            f"- 阈值：{threshold}分\n\n"
+            f"请根据审查意见修复问题，并在确认处理完成后解决本讨论。\n\n"
+            f"{self._LOW_SCORE_BLOCK_MARKER}"
+        )
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/discussions"
+        )
+        headers = {
+            'Private-Token': self.gitlab_token,
+            'Content-Type': 'application/json'
+        }
+        response = requests.post(url, headers=headers, json={'body': body}, verify=False)
+        if response.status_code == 201:
+            logger.info(
+                f"Low-score blocking discussion created for MR !{self.merge_request_iid} "
+                f"(score={score}, threshold={threshold})."
+            )
+            return True
+        logger.error(
+            f"Failed to create low-score blocking discussion: {response.status_code}, {response.text}"
+        )
+        return False
+
 
 class PushHandler:
     def __init__(self, webhook_data: dict, gitlab_token: str, gitlab_url: str):
