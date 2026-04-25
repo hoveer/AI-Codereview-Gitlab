@@ -176,12 +176,16 @@ class MergeRequestHandler:
         """通过 compare API 获取两个提交之间的差异"""
         url = (urljoin(f"{self.gitlab_url}/",
                        f"api/v4/projects/{self.project_id}/repository/compare")
-               + f"?from={from_sha}&to={to_sha}")
+               + f"?from={from_sha}&to={to_sha}&straight=true")
         headers = {'Private-Token': self.gitlab_token}
         response = requests.get(url, headers=headers, verify=False)
         logger.debug(f"MergeRequestHandler repository compare: {response.status_code}, URL: {url}")
         if response.status_code == 200:
-            return response.json().get('diffs', [])
+            data = response.json()
+            if data.get('compare_timeout'):
+                logger.warning("GitLab compare API timed out, diffs may be incomplete, falling back to full review.")
+                return []
+            return data.get('diffs', [])
         logger.warning(f"Failed to compare: {response.status_code}, {response.text}")
         return []
 
@@ -445,12 +449,16 @@ class NoteHandler:
             return []
         url = (urljoin(f"{self.gitlab_url}/",
                        f"api/v4/projects/{self.project_id}/repository/compare")
-               + f"?from={from_sha}&to={to_sha}")
+               + f"?from={from_sha}&to={to_sha}&straight=true")
         headers = {'Private-Token': self.gitlab_token}
         response = requests.get(url, headers=headers, verify=False)
         logger.debug(f"NoteHandler repository compare: {response.status_code}, URL: {url}")
         if response.status_code == 200:
-            return response.json().get('diffs', [])
+            data = response.json()
+            if data.get('compare_timeout'):
+                logger.warning("NoteHandler: GitLab compare API timed out, diffs may be incomplete, falling back to full review.")
+                return []
+            return data.get('diffs', [])
         logger.warning(f"NoteHandler failed to compare: {response.status_code}, {response.text}")
         return []
 

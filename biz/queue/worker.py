@@ -130,7 +130,8 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                         is_incremental = True
                         logger.info(f"Incremental MR review: {prev_commit_id} -> {last_commit_id}, {len(changes)} file(s).")
                     else:
-                        logger.info("Incremental diff has no relevant file changes, falling back to full review.")
+                        logger.info("Incremental diff has no relevant file changes, skipping review.")
+                        return  # 有新 commit 但均不涉及受支持文件类型，不触发全量审核
                 else:
                     logger.info("Incremental diff is empty (possible force push / rebase), falling back to full review.")
             except Exception as e:
@@ -259,7 +260,9 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                                 is_incremental = True
                                 logger.info(f"Note event incremental review: {prev_commit_id} -> {current_commit_id}, {len(changes)} file(s).")
                             else:
-                                logger.info("Note event incremental diff has no relevant changes, falling back to full review.")
+                                logger.info("Note event incremental diff has no relevant changes, skipping review.")
+                                handler.add_merge_request_note('当前 MR 自上次审核后新增提交未涉及受支持的文件类型，无需审核。')
+                                return
                         else:
                             logger.info("Note event incremental diff is empty, falling back to full review.")
                     except Exception as e:
