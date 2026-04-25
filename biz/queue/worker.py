@@ -15,7 +15,8 @@ from biz.utils.log import logger
 
 _INCREMENTAL_REVIEW_PREFIX = "[增量审查：本次仅包含自上次审核以来的新增提交] "
 _LOW_SCORE_BLOCK_DEFAULT_THRESHOLD = 60
-
+_REVIEW_SCORE_HIGH_THRESHOLD = 90   # score > this → tada emoji
+_REVIEW_SCORE_LOW_THRESHOLD = 60    # score < this → cold_sweat emoji
 
 def _try_block_mr_if_low_score(handler: MergeRequestHandler, review_result: str):
     """低分阻止合并：若 AI 审核总分低于阈值，在 MR 中创建未解决讨论。
@@ -191,13 +192,15 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
 
         # 创建占位评论，并在其上添加 eyes 表情，表示审核正在进行中
         placeholder_note_id = None
+        placeholder_eyes_added = False
         try:
             placeholder_note_id = handler.create_mr_note("👀 AI正在审核中...")
         except Exception as _e:
             logger.warning(f"Failed to create placeholder note: {_e}")
         if placeholder_note_id:
             try:
-                handler.award_emoji_to_note(placeholder_note_id, "eyes")
+                award_id = handler.award_emoji_to_note(placeholder_note_id, "eyes")
+                placeholder_eyes_added = award_id is not None
             except Exception as _e:
                 logger.warning(f"Failed to award eyes emoji to placeholder note: {_e}")
 
@@ -209,7 +212,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
         except Exception:
             # 清理 eyes 后重新抛出，避免 eyes 永久停留
-            if placeholder_note_id:
+            if placeholder_note_id and placeholder_eyes_added:
                 try:
                     handler.remove_note_award_emoji(placeholder_note_id, "eyes")
                 except Exception as _e:
@@ -231,7 +234,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
 
         # 移除 eyes 表情
-        if placeholder_note_id:
+        if placeholder_note_id and placeholder_eyes_added:
             try:
                 handler.remove_note_award_emoji(placeholder_note_id, "eyes")
             except Exception as _e:
@@ -242,9 +245,9 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             try:
                 score = CodeReviewer.extract_review_score(review_result)
                 if score is not None:
-                    if score > 90:
+                    if score > _REVIEW_SCORE_HIGH_THRESHOLD:
                         handler.award_emoji_to_note(note_for_emoji, "tada")
-                    elif score < 60:
+                    elif score < _REVIEW_SCORE_LOW_THRESHOLD:
                         handler.award_emoji_to_note(note_for_emoji, "cold_sweat")
             except Exception as _e:
                 logger.warning(f"Failed to apply score emoji: {_e}")
@@ -374,9 +377,11 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
 
             # 为触发 note 添加 eyes 表情，表示审核正在进行中
             trigger_note_id = handler.note_id
+            trigger_eyes_added = False
             if trigger_note_id:
                 try:
-                    handler.award_emoji_to_note(trigger_note_id, "eyes")
+                    award_id = handler.award_emoji_to_note(trigger_note_id, "eyes")
+                    trigger_eyes_added = award_id is not None
                 except Exception as _e:
                     logger.warning(f"Failed to award eyes emoji to trigger note: {_e}")
 
@@ -385,7 +390,7 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                 handler.add_merge_request_note(f'Auto Review Result: \n{review_result}')
             except Exception:
                 # 清理 eyes 后重新抛出
-                if trigger_note_id:
+                if trigger_note_id and trigger_eyes_added:
                     try:
                         handler.remove_note_award_emoji(trigger_note_id, "eyes")
                     except Exception as _e:
@@ -393,7 +398,7 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                 raise
 
             # 移除 eyes 表情
-            if trigger_note_id:
+            if trigger_note_id and trigger_eyes_added:
                 try:
                     handler.remove_note_award_emoji(trigger_note_id, "eyes")
                 except Exception as _e:
@@ -404,9 +409,9 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                 try:
                     score = CodeReviewer.extract_review_score(review_result)
                     if score is not None:
-                        if score > 90:
+                        if score > _REVIEW_SCORE_HIGH_THRESHOLD:
                             handler.award_emoji_to_note(trigger_note_id, "tada")
-                        elif score < 60:
+                        elif score < _REVIEW_SCORE_LOW_THRESHOLD:
                             handler.award_emoji_to_note(trigger_note_id, "cold_sweat")
                 except Exception as _e:
                     logger.warning(f"Failed to apply score emoji to trigger note: {_e}")
