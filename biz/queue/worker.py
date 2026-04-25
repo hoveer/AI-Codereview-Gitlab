@@ -14,6 +14,36 @@ from biz.utils.im import notifier
 from biz.utils.log import logger
 
 _INCREMENTAL_REVIEW_PREFIX = "[增量审查：本次仅包含自上次审核以来的新增提交] "
+_LOW_SCORE_BLOCK_DEFAULT_THRESHOLD = 60
+
+
+def _try_block_mr_if_low_score(handler: MergeRequestHandler, review_result: str):
+    """低分阻止合并：若 AI 审核总分低于阈值，在 MR 中创建未解决讨论。
+
+    仅在 LOW_SCORE_BLOCK_MR_ENABLED=1 时生效，且不影响正常审核流程。
+    """
+    if os.environ.get('LOW_SCORE_BLOCK_MR_ENABLED', '0') != '1':
+        return
+
+    score = CodeReviewer.extract_review_score(review_result)
+    if score is None:
+        logger.info("Low-score block: no valid score found in review result, skipping.")
+        return
+
+    try:
+        threshold = int(os.environ.get('LOW_SCORE_BLOCK_MR_THRESHOLD', str(_LOW_SCORE_BLOCK_DEFAULT_THRESHOLD)))
+    except ValueError:
+        threshold = _LOW_SCORE_BLOCK_DEFAULT_THRESHOLD
+
+    if score >= threshold:
+        logger.info(f"Low-score block: score={score} >= threshold={threshold}, no block needed.")
+        return
+
+    logger.info(f"Low-score block: score={score} < threshold={threshold}, creating blocking discussion.")
+    try:
+        handler.create_low_score_block_discussion(score, threshold)
+    except Exception as e:
+        logger.error(f"Low-score block: failed to create blocking discussion: {e}")
 
 
 def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gitlab_url_slug: str):
@@ -189,6 +219,9 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                 mr_iid=mr_iid,
             )
         )
+
+        # 低分阻止合并：在标准 MR 审核完成后执行，不影响正常审核流程
+        _try_block_mr_if_low_score(handler, review_result)
 
     except Exception as e:
         error_message = f'AI Code Review 服务出现未知错误: {str(e)}\n{traceback.format_exc()}'

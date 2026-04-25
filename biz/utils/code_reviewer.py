@@ -101,12 +101,18 @@ class CodeReviewer(BaseReviewer):
         return self.call_llm(messages)
 
     @staticmethod
+    def extract_review_score(review_text: str):
+        """解析 AI 返回的 Review 结果，返回评分；未找到则返回 None"""
+        if not review_text:
+            return None
+        match = re.search(r"总分[:：]\s*(\d+)分?", review_text)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
     def parse_review_score(review_text: str) -> int:
         """解析 AI 返回的 Review 结果，返回评分"""
-        if not review_text:
-            return 0
-        match = re.search(r"总分[:：]\s*(\d+)分?", review_text)
-        return int(match.group(1)) if match else 0
+        score = CodeReviewer.extract_review_score(review_text)
+        return score if score is not None else 0
 
 
 class MrChatReviewer(BaseReviewer):
