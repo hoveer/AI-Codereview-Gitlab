@@ -15,7 +15,8 @@ from biz.utils.log import logger
 
 _INCREMENTAL_REVIEW_PREFIX = "[增量审查：本次仅包含自上次审核以来的新增提交] "
 _LOW_SCORE_BLOCK_DEFAULT_THRESHOLD = 60
-
+_REVIEW_SCORE_HIGH_THRESHOLD = 90   # score > this → tada emoji
+_REVIEW_SCORE_LOW_THRESHOLD = 60    # score < this → cold_sweat emoji
 
 def _try_block_mr_if_low_score(handler: MergeRequestHandler, review_result: str):
     """低分阻止合并：若 AI 审核总分低于阈值，在 MR 中创建未解决讨论。
@@ -189,14 +190,72 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             logger.error('Failed to get commits')
             return
 
+        # 创建占位评论，并在其上添加 eyes 表情，表示审核正在进行中
+        placeholder_note_id = None
+        placeholder_eyes_added = False
+        try:
+            placeholder_note_id = handler.create_mr_note("👀 AI正在审核中...")
+        except Exception as _e:
+            logger.warning(f"Failed to create placeholder note: {_e}")
+        if placeholder_note_id:
+            try:
+                award_id = handler.award_emoji_to_note(placeholder_note_id, "eyes")
+                placeholder_eyes_added = award_id is not None
+            except Exception as _e:
+                logger.warning(f"Failed to award eyes emoji to placeholder note: {_e}")
+
         # review 代码
         commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
         if is_incremental:
             commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
-        review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
+        try:
+            review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
+        except Exception:
+            # 清理占位评论及 eyes 表情，避免"审核中"状态永久停留
+            if placeholder_note_id:
+                try:
+                    handler.update_mr_note(placeholder_note_id, "⚠️ AI审核未能完成，请稍后重试。")
+                except Exception as _e:
+                    logger.warning(f"Failed to update placeholder note during error cleanup: {_e}")
+                if placeholder_eyes_added:
+                    try:
+                        handler.remove_note_award_emoji(placeholder_note_id, "eyes")
+                    except Exception as _e:
+                        logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
+            raise
 
-        # 将review结果提交到Gitlab的 notes
-        handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
+        # 将review结果写入占位评论（编辑），失败则回退为新建评论
+        note_for_emoji = placeholder_note_id
+        if placeholder_note_id:
+            try:
+                updated = handler.update_mr_note(placeholder_note_id, f'Auto Review Result: \n{review_result}')
+                if not updated:
+                    raise RuntimeError("update_mr_note returned False")
+            except Exception as _e:
+                logger.warning(f"Failed to update placeholder note, falling back to new note: {_e}")
+                handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
+                note_for_emoji = None
+        else:
+            handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
+
+        # 移除 eyes 表情
+        if placeholder_note_id and placeholder_eyes_added:
+            try:
+                handler.remove_note_award_emoji(placeholder_note_id, "eyes")
+            except Exception as _e:
+                logger.warning(f"Failed to remove eyes emoji: {_e}")
+
+        # 根据评分添加结果表情（仅当占位评论成功编辑时）
+        if note_for_emoji:
+            try:
+                score = CodeReviewer.extract_review_score(review_result)
+                if score is not None:
+                    if score > _REVIEW_SCORE_HIGH_THRESHOLD:
+                        handler.award_emoji_to_note(note_for_emoji, "tada")
+                    elif score < _REVIEW_SCORE_LOW_THRESHOLD:
+                        handler.award_emoji_to_note(note_for_emoji, "cold_sweat")
+            except Exception as _e:
+                logger.warning(f"Failed to apply score emoji: {_e}")
 
         # dispatch merge_request_reviewed event
         event_manager['merge_request_reviewed'].send(
@@ -320,8 +379,47 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
             if is_incremental:
                 commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
-            review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
-            handler.add_merge_request_note(f'Auto Review Result: \n{review_result}')
+
+            # 为触发 note 添加 eyes 表情，表示审核正在进行中
+            trigger_note_id = handler.note_id
+            trigger_eyes_added = False
+            if trigger_note_id:
+                try:
+                    award_id = handler.award_emoji_to_note(trigger_note_id, "eyes")
+                    trigger_eyes_added = award_id is not None
+                except Exception as _e:
+                    logger.warning(f"Failed to award eyes emoji to trigger note: {_e}")
+
+            try:
+                review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
+                handler.add_merge_request_note(f'Auto Review Result: \n{review_result}')
+            except Exception:
+                # 清理 eyes 后重新抛出
+                if trigger_note_id and trigger_eyes_added:
+                    try:
+                        handler.remove_note_award_emoji(trigger_note_id, "eyes")
+                    except Exception as _e:
+                        logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
+                raise
+
+            # 移除 eyes 表情
+            if trigger_note_id and trigger_eyes_added:
+                try:
+                    handler.remove_note_award_emoji(trigger_note_id, "eyes")
+                except Exception as _e:
+                    logger.warning(f"Failed to remove eyes emoji: {_e}")
+
+            # 根据评分添加结果表情
+            if trigger_note_id:
+                try:
+                    score = CodeReviewer.extract_review_score(review_result)
+                    if score is not None:
+                        if score > _REVIEW_SCORE_HIGH_THRESHOLD:
+                            handler.award_emoji_to_note(trigger_note_id, "tada")
+                        elif score < _REVIEW_SCORE_LOW_THRESHOLD:
+                            handler.award_emoji_to_note(trigger_note_id, "cold_sweat")
+                except Exception as _e:
+                    logger.warning(f"Failed to apply score emoji to trigger note: {_e}")
 
             # 保存审核记录，使后续触发可以正确进行增量判断
             if mr_ident_available:
