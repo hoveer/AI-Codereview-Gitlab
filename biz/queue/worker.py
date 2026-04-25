@@ -109,17 +109,20 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         project_name = webhook_data['project']['name']
         source_branch = object_attributes.get('source_branch', '')
         target_branch = object_attributes.get('target_branch', '')
+        mr_iid = object_attributes.get('iid')  # GitLab per-project MR IID (e.g. 42 for !42)
 
         # 如果当前 commit 已经审核过，则跳过（幂等去重）
         if last_commit_id:
-            if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch, last_commit_id):
+            if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch,
+                                                            last_commit_id, mr_iid=mr_iid):
                 logger.info(f"Merge Request with last_commit_id {last_commit_id} already exists, skipping review for {project_name}.")
                 return
 
         # 尝试增量审核：获取上次审核的 commit id，若存在则只审核新增部分
         is_incremental = False
         changes = None
-        prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch, target_branch)
+        prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch, target_branch,
+                                                                     mr_iid=mr_iid)
         if prev_commit_id and last_commit_id and prev_commit_id != last_commit_id:
             try:
                 incremental_diffs = handler.repository_compare(prev_commit_id, last_commit_id)
@@ -183,6 +186,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                 additions=additions,
                 deletions=deletions,
                 last_commit_id=last_commit_id,
+                mr_iid=mr_iid,
             )
         )
 
@@ -236,11 +240,13 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             source_branch = handler.source_branch
             target_branch = handler.target_branch
             current_commit_id = handler.last_commit_id
+            mr_iid = handler.merge_request_iid  # GitLab per-project MR IID
             mr_ident_available = bool(current_commit_id and project_name and source_branch and target_branch)
 
             # 如果当前 commit 已经审核过，提示无新增改动
             if mr_ident_available:
-                if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch, current_commit_id):
+                if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch,
+                                                                current_commit_id, mr_iid=mr_iid):
                     logger.info("Note event: no new changes since last review.")
                     handler.add_merge_request_note('当前 MR 自上次审核后无新增代码变更，无需重复审核。')
                     return
@@ -249,7 +255,8 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             is_incremental = False
             changes = None
             if mr_ident_available:
-                prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch, target_branch)
+                prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch,
+                                                                             target_branch, mr_iid=mr_iid)
                 if prev_commit_id and prev_commit_id != current_commit_id:
                     try:
                         incremental_diffs = handler.repository_compare(prev_commit_id, current_commit_id)
@@ -303,6 +310,7 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                     additions=additions,
                     deletions=deletions,
                     last_commit_id=current_commit_id,
+                    mr_iid=mr_iid,
                 ))
         else:
             # @机器人 + 额外文本，走对话式回复
