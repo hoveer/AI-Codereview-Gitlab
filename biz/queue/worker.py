@@ -13,6 +13,7 @@ from biz.utils.code_reviewer import CodeReviewer, MrChatReviewer
 from biz.utils.im import notifier
 from biz.utils.log import logger
 
+_INCREMENTAL_REVIEW_PREFIX = "[增量审查：本次仅包含自上次审核以来的新增提交] "
 
 
 def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gitlab_url_slug: str):
@@ -103,31 +104,54 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             logger.info(f"Merge Request Hook event, action={handler.action}, ignored.")
             return
 
-        # 检查last_commit_id是否已经存在，如果存在则跳过处理
+        # 提取 MR 唯一标识信息及当前最新 commit id
         last_commit_id = object_attributes.get('last_commit', {}).get('id', '')
+        project_name = webhook_data['project']['name']
+        source_branch = object_attributes.get('source_branch', '')
+        target_branch = object_attributes.get('target_branch', '')
+        mr_iid = object_attributes.get('iid')  # GitLab per-project MR IID (e.g. 42 for !42)
+
+        # 如果当前 commit 已经审核过，则跳过（幂等去重）
         if last_commit_id:
-            project_name = webhook_data['project']['name']
-            source_branch = object_attributes.get('source_branch', '')
-            target_branch = object_attributes.get('target_branch', '')
-            
-            if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch, last_commit_id):
+            if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch,
+                                                            last_commit_id, mr_iid=mr_iid):
                 logger.info(f"Merge Request with last_commit_id {last_commit_id} already exists, skipping review for {project_name}.")
                 return
 
-        # 仅仅在MR创建或更新时进行Code Review
-        # 获取Merge Request的changes
-        changes = handler.get_merge_request_changes()
-        logger.info('changes: %s', changes)
-        changes = filter_changes(changes)
-        if not changes:
-            logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
-            return
+        # 尝试增量审核：获取上次审核的 commit id，若存在则只审核新增部分
+        is_incremental = False
+        changes = None
+        prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch, target_branch,
+                                                                     mr_iid=mr_iid)
+        if prev_commit_id and last_commit_id and prev_commit_id != last_commit_id:
+            try:
+                incremental_diffs = handler.repository_compare(prev_commit_id, last_commit_id)
+                if incremental_diffs:
+                    filtered = filter_changes(incremental_diffs)
+                    if filtered:
+                        changes = filtered
+                        is_incremental = True
+                        logger.info(f"Incremental MR review: {prev_commit_id} -> {last_commit_id}, {len(changes)} file(s).")
+                    else:
+                        logger.info("Incremental diff has no relevant file changes, skipping review.")
+                        return  # 有新 commit 但均不涉及受支持文件类型，不触发全量审核
+                else:
+                    logger.info("Incremental diff is empty (possible force push / rebase), falling back to full review.")
+            except Exception as e:
+                logger.warning(f"Incremental diff failed: {e}, falling back to full review.")
+
+        if not is_incremental:
+            # 全量审核
+            raw_changes = handler.get_merge_request_changes()
+            logger.info('changes: %s', raw_changes)
+            changes = filter_changes(raw_changes)
+            if not changes:
+                logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
+                return
+
         # 统计本次新增、删除的代码总数
-        additions = 0
-        deletions = 0
-        for item in changes:
-            additions += item.get('additions', 0)
-            deletions += item.get('deletions', 0)
+        additions = sum(item.get('additions', 0) for item in changes)
+        deletions = sum(item.get('deletions', 0) for item in changes)
 
         # 获取Merge Request的commits
         commits = handler.get_merge_request_commits()
@@ -137,6 +161,8 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
 
         # review 代码
         commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+        if is_incremental:
+            commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
         review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
 
         # 将review结果提交到Gitlab的 notes
@@ -160,6 +186,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                 additions=additions,
                 deletions=deletions,
                 last_commit_id=last_commit_id,
+                mr_iid=mr_iid,
             )
         )
 
@@ -209,8 +236,48 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             # 仅 @机器人，触发代码审查
             logger.info("Note event: bot mentioned without extra text, triggering code review.")
 
-            changes = handler.get_merge_request_changes()
-            changes = filter_changes(changes)
+            project_name = webhook_data.get('project', {}).get('name', '')
+            source_branch = handler.source_branch
+            target_branch = handler.target_branch
+            current_commit_id = handler.last_commit_id
+            mr_iid = handler.merge_request_iid  # GitLab per-project MR IID
+            mr_ident_available = bool(current_commit_id and project_name and source_branch and target_branch)
+
+            # 如果当前 commit 已经审核过，提示无新增改动
+            if mr_ident_available:
+                if ReviewService.check_mr_last_commit_id_exists(project_name, source_branch, target_branch,
+                                                                current_commit_id, mr_iid=mr_iid):
+                    logger.info("Note event: no new changes since last review.")
+                    handler.add_merge_request_note('当前 MR 自上次审核后无新增代码变更，无需重复审核。')
+                    return
+
+            # 尝试增量审核
+            is_incremental = False
+            changes = None
+            if mr_ident_available:
+                prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch,
+                                                                             target_branch, mr_iid=mr_iid)
+                if prev_commit_id and prev_commit_id != current_commit_id:
+                    try:
+                        incremental_diffs = handler.repository_compare(prev_commit_id, current_commit_id)
+                        if incremental_diffs:
+                            filtered = filter_changes(incremental_diffs)
+                            if filtered:
+                                changes = filtered
+                                is_incremental = True
+                                logger.info(f"Note event incremental review: {prev_commit_id} -> {current_commit_id}, {len(changes)} file(s).")
+                            else:
+                                logger.info("Note event incremental diff has no relevant changes, skipping review.")
+                                handler.add_merge_request_note('当前 MR 自上次审核后新增提交未涉及受支持的文件类型，无需审核。')
+                                return
+                        else:
+                            logger.info("Note event incremental diff is empty, falling back to full review.")
+                    except Exception as e:
+                        logger.warning(f"Note event incremental diff failed: {e}, falling back to full review.")
+
+            if not is_incremental:
+                changes = filter_changes(handler.get_merge_request_changes())
+
             if not changes:
                 logger.info('Note event review: 未检测到有关代码的修改。')
                 handler.add_merge_request_note('关注的文件没有修改，无需 Review。')
@@ -218,8 +285,33 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
 
             commits = handler.get_merge_request_commits()
             commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            if is_incremental:
+                commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
             review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
             handler.add_merge_request_note(f'Auto Review Result: \n{review_result}')
+
+            # 保存审核记录，使后续触发可以正确进行增量判断
+            if mr_ident_available:
+                additions = sum(item.get('additions', 0) for item in changes)
+                deletions = sum(item.get('deletions', 0) for item in changes)
+                ReviewService.insert_mr_review_log(MergeRequestReviewEntity(
+                    project_name=project_name,
+                    author=webhook_data.get('user', {}).get('username', ''),
+                    author_name=webhook_data.get('user', {}).get('name', ''),
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                    updated_at=int(datetime.now().timestamp()),
+                    commits=commits,
+                    score=CodeReviewer.parse_review_score(review_text=review_result),
+                    url=webhook_data.get('merge_request', {}).get('url', ''),
+                    review_result=review_result,
+                    url_slug=gitlab_url_slug,
+                    webhook_data=webhook_data,
+                    additions=additions,
+                    deletions=deletions,
+                    last_commit_id=current_commit_id,
+                    mr_iid=mr_iid,
+                ))
         else:
             # @机器人 + 额外文本，走对话式回复
             logger.info(f"Note event: bot mentioned with extra text, generating chat reply. question={extra_text!r}")

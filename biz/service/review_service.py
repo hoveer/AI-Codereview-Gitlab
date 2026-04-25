@@ -29,7 +29,8 @@ class ReviewService:
                             review_result TEXT,
                             additions INTEGER DEFAULT 0,
                             deletions INTEGER DEFAULT 0,
-                            last_commit_id TEXT DEFAULT ''
+                            last_commit_id TEXT DEFAULT '',
+                            mr_iid INTEGER DEFAULT NULL
                         )
                     ''')
                 cursor.execute('''
@@ -63,6 +64,11 @@ class ReviewService:
                         "name": "last_commit_id",
                         "type": "TEXT",
                         "default": "''"
+                    },
+                    {
+                        "name": "mr_iid",
+                        "type": "INTEGER",
+                        "default": "NULL"
                     }
                 ]
                 cursor.execute(f"PRAGMA table_info('mr_review_log')")
@@ -96,14 +102,14 @@ class ReviewService:
                 cursor.execute('''
                                 INSERT INTO mr_review_log (project_name, author, author_name, source_branch, target_branch, 
                                 updated_at, commit_messages, score, url, review_result, additions, deletions, 
-                                last_commit_id)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                last_commit_id, mr_iid)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ''',
                                (entity.project_name, entity.author, entity.author_name or None,
                                 entity.source_branch,
                                 entity.target_branch, entity.updated_at, entity.commit_messages, entity.score,
                                 entity.url, entity.review_result, entity.additions, entity.deletions,
-                                entity.last_commit_id))
+                                entity.last_commit_id, entity.mr_iid))
                 conn.commit()
         except sqlite3.DatabaseError as e:
             print(f"Error inserting review log: {e}")
@@ -147,20 +153,62 @@ class ReviewService:
             return pd.DataFrame()
 
     @staticmethod
-    def check_mr_last_commit_id_exists(project_name: str, source_branch: str, target_branch: str, last_commit_id: str) -> bool:
-        """检查指定项目的Merge Request是否已经存在相同的last_commit_id"""
+    def check_mr_last_commit_id_exists(project_name: str, source_branch: str, target_branch: str,
+                                       last_commit_id: str, mr_iid: int = None) -> bool:
+        """检查指定项目的Merge Request是否已经存在相同的last_commit_id。
+
+        当 mr_iid 可用时，以 (project_name, mr_iid) 作为 MR 唯一标识进行查询，
+        避免同名分支重复开/关 MR 时误命中历史记录；否则回退到基于分支名的查询。
+        """
         try:
             with sqlite3.connect(ReviewService.DB_FILE) as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT COUNT(*) FROM mr_review_log 
-                    WHERE project_name = ? AND source_branch = ? AND target_branch = ? AND last_commit_id = ?
-                ''', (project_name, source_branch, target_branch, last_commit_id))
+                if mr_iid is not None:
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM mr_review_log
+                        WHERE project_name = ? AND mr_iid = ? AND last_commit_id = ?
+                    ''', (project_name, mr_iid, last_commit_id))
+                else:
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM mr_review_log 
+                        WHERE project_name = ? AND source_branch = ? AND target_branch = ? AND last_commit_id = ?
+                    ''', (project_name, source_branch, target_branch, last_commit_id))
                 count = cursor.fetchone()[0]
                 return count > 0
         except sqlite3.DatabaseError as e:
             print(f"Error checking last_commit_id: {e}")
             return False
+
+    @staticmethod
+    def get_last_mr_review_commit_id(project_name: str, source_branch: str, target_branch: str,
+                                     mr_iid: int = None) -> str:
+        """获取最近一次 MR 审核记录的 last_commit_id，若无则返回空字符串。
+
+        当 mr_iid 可用时，以 (project_name, mr_iid) 作为 MR 唯一标识进行查询，
+        避免同名分支重复开/关 MR 时误命中历史记录；否则回退到基于分支名的查询。
+        """
+        try:
+            with sqlite3.connect(ReviewService.DB_FILE) as conn:
+                cursor = conn.cursor()
+                if mr_iid is not None:
+                    cursor.execute('''
+                        SELECT last_commit_id FROM mr_review_log
+                        WHERE project_name = ? AND mr_iid = ?
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                    ''', (project_name, mr_iid))
+                else:
+                    cursor.execute('''
+                        SELECT last_commit_id FROM mr_review_log
+                        WHERE project_name = ? AND source_branch = ? AND target_branch = ?
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                    ''', (project_name, source_branch, target_branch))
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else ''
+        except sqlite3.DatabaseError as e:
+            print(f"Error getting last mr review commit id: {e}")
+            return ''
 
     @staticmethod
     def insert_push_review_log(entity: PushReviewEntity):
