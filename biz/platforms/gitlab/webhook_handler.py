@@ -172,6 +172,73 @@ class MergeRequestHandler:
             logger.error(f"Failed to add note: {response.status_code}")
             logger.error(response.text)
 
+    def create_mr_note(self, body: str):
+        """创建 MR note，返回创建的 note ID，失败则返回 None。"""
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes"
+        )
+        headers = {'Private-Token': self.gitlab_token, 'Content-Type': 'application/json'}
+        response = requests.post(url, headers=headers, json={'body': body}, verify=False)
+        logger.debug(f"Create MR note: {response.status_code}")
+        if response.status_code == 201:
+            note_id = response.json().get('id')
+            logger.info(f"Placeholder note created with id={note_id}.")
+            return note_id
+        logger.error(f"Failed to create MR note: {response.status_code}, {response.text}")
+        return None
+
+    def update_mr_note(self, note_id: int, body: str) -> bool:
+        """编辑已有 MR note，返回是否成功。"""
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}"
+        )
+        headers = {'Private-Token': self.gitlab_token, 'Content-Type': 'application/json'}
+        response = requests.put(url, headers=headers, json={'body': body}, verify=False)
+        logger.debug(f"Update MR note {note_id}: {response.status_code}")
+        if response.status_code == 200:
+            return True
+        logger.error(f"Failed to update MR note {note_id}: {response.status_code}, {response.text}")
+        return False
+
+    def award_emoji_to_note(self, note_id: int, emoji_name: str):
+        """为 MR note 添加表情，返回 award ID，失败则返回 None。"""
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}/award_emoji"
+        )
+        headers = {'Private-Token': self.gitlab_token, 'Content-Type': 'application/json'}
+        response = requests.post(url, headers=headers, json={'name': emoji_name}, verify=False)
+        logger.debug(f"Award emoji '{emoji_name}' to note {note_id}: {response.status_code}")
+        if response.status_code == 201:
+            return response.json().get('id')
+        logger.warning(f"Failed to award emoji '{emoji_name}' to note {note_id}: {response.status_code}, {response.text}")
+        return None
+
+    def remove_note_award_emoji(self, note_id: int, emoji_name: str):
+        """移除 MR note 上指定名称的表情（移除所有匹配项）。"""
+        list_url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}/award_emoji"
+        )
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(list_url, headers=headers, verify=False)
+        if response.status_code != 200:
+            logger.warning(f"Failed to list award emojis for note {note_id}: {response.status_code}, {response.text}")
+            return
+        for award in response.json():
+            if award.get('name') == emoji_name:
+                award_id = award.get('id')
+                del_url = urljoin(
+                    f"{self.gitlab_url}/",
+                    f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}/award_emoji/{award_id}"
+                )
+                del_resp = requests.delete(del_url, headers=headers, verify=False)
+                logger.debug(f"Remove emoji '{emoji_name}' (award_id={award_id}) from note {note_id}: {del_resp.status_code}")
+                if del_resp.status_code not in (200, 204):
+                    logger.warning(f"Failed to delete award emoji {award_id} from note {note_id}: {del_resp.status_code}, {del_resp.text}")
+
     def repository_compare(self, from_sha: str, to_sha: str) -> list:
         """通过 compare API 获取两个提交之间的差异"""
         url = (urljoin(f"{self.gitlab_url}/",
@@ -454,6 +521,7 @@ class NoteHandler:
         self.gitlab_url = gitlab_url
         self.project_id = None
         self.note = None
+        self.note_id = None
         self.noteable_type = None
         self.merge_request_iid = None
         self.discussion_id = None
@@ -471,6 +539,7 @@ class NoteHandler:
         )
         object_attributes = self.webhook_data.get('object_attributes', {})
         self.note = object_attributes.get('note', '')
+        self.note_id = object_attributes.get('id')
         self.noteable_type = object_attributes.get('noteable_type', '')
         self.discussion_id = object_attributes.get('discussion_id')
         self.action = object_attributes.get('action', '')
@@ -568,3 +637,39 @@ class NoteHandler:
         else:
             logger.error(f"NoteHandler: Failed to add note: {response.status_code}, {response.text}")
 
+    def award_emoji_to_note(self, note_id: int, emoji_name: str):
+        """为 MR note 添加表情，返回 award ID，失败则返回 None。"""
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}/award_emoji"
+        )
+        headers = {'Private-Token': self.gitlab_token, 'Content-Type': 'application/json'}
+        response = requests.post(url, headers=headers, json={'name': emoji_name}, verify=False)
+        logger.debug(f"NoteHandler award emoji '{emoji_name}' to note {note_id}: {response.status_code}")
+        if response.status_code == 201:
+            return response.json().get('id')
+        logger.warning(f"NoteHandler failed to award emoji '{emoji_name}' to note {note_id}: {response.status_code}, {response.text}")
+        return None
+
+    def remove_note_award_emoji(self, note_id: int, emoji_name: str):
+        """移除 MR note 上指定名称的表情（移除所有匹配项）。"""
+        list_url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}/award_emoji"
+        )
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(list_url, headers=headers, verify=False)
+        if response.status_code != 200:
+            logger.warning(f"NoteHandler failed to list award emojis for note {note_id}: {response.status_code}, {response.text}")
+            return
+        for award in response.json():
+            if award.get('name') == emoji_name:
+                award_id = award.get('id')
+                del_url = urljoin(
+                    f"{self.gitlab_url}/",
+                    f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}/award_emoji/{award_id}"
+                )
+                del_resp = requests.delete(del_url, headers=headers, verify=False)
+                logger.debug(f"NoteHandler remove emoji '{emoji_name}' (award_id={award_id}) from note {note_id}: {del_resp.status_code}")
+                if del_resp.status_code not in (200, 204):
+                    logger.warning(f"NoteHandler failed to delete award emoji {award_id} from note {note_id}: {del_resp.status_code}, {del_resp.text}")
