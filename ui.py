@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import base64
 import time
+import html
 import pandas as pd
 from dotenv import load_dotenv
 import matplotlib.pyplot as plt
@@ -26,9 +27,13 @@ from streamlit_cookies_manager import CookieManager
 
 load_dotenv("conf/.env")
 
+HIGH_SCORE_COLOR = "#8CCF90"
+LOW_SCORE_COLOR = "#E6E944"
+SCORE_EMOJI_PARAM = os.getenv("SCORE_EMOJI_DISPLAY", os.getenv("SCORE_EMOJI", "1"))
+
 
 def set_global_font():
-    """设置全局字体，如果字体文件不存在则忽略并使用默认字体"""
+    """设置全局字体，如果字体文件不存在则忽略并使用默认字��"""
     font_path = "fonts/SourceHanSansCN-Regular.otf"
     if Path(font_path).exists():
         try:
@@ -160,6 +165,79 @@ def authenticate(username, password, remember_password=False):
     return False
 
 
+def get_score_emoji(score):
+    if str(SCORE_EMOJI_PARAM).strip() in {"0", "false", "False", "no", "off", "OFF"}:
+        return ""
+
+    if pd.isna(score):
+        return ""
+    if score >= 90:
+        return "🟢"
+    if score >= 75:
+        return "😊"
+    if score >= 60:
+        return "😐"
+    return "⚠️"
+
+
+def get_score_color(score):
+    if pd.isna(score):
+        return ""
+    return HIGH_SCORE_COLOR if score >= 80 else LOW_SCORE_COLOR
+
+
+def build_score_link(score, url):
+    score_text = "" if pd.isna(score) else f"{float(score):.0f}"
+    emoji = get_score_emoji(score)
+    display_text = f"{emoji} {score_text}".strip() or "查看详情"
+    safe_text = html.escape(display_text)
+    safe_url = html.escape(str(url) if pd.notna(url) else "#", quote=True)
+    return (
+        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer" '
+        f'style="text-decoration:none;color:inherit;font-weight:600;">{safe_text}</a>'
+    )
+
+
+def build_tooltip_cell(value):
+    if pd.isna(value):
+        return ""
+    value_str = str(value)
+    escaped = html.escape(value_str)
+    return f'<div title="{escaped}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{escaped}</div>'
+
+
+def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
+    header_html = "".join(f"<th>{html.escape(title)}</th>" for title in headers)
+    rows_html = []
+
+    for index, row in df.reset_index(drop=True).iterrows():
+        row_cells = [f"<td title=\"{index + 1}\">{index + 1}</td>"]
+        for col in ordered_columns:
+            value = row.get(col, "")
+            cell_style = ""
+            cell_content = build_tooltip_cell(value)
+            if col == score_column:
+                cell_color = get_score_color(value)
+                if cell_color:
+                    cell_style = f' style="background-color: {cell_color};"'
+                cell_content = build_score_link(value, row.get("url", "#"))
+            row_cells.append(f"<td{cell_style}>{cell_content}</td>")
+        rows_html.append(f"<tr>{''.join(row_cells)}</tr>")
+
+    return f"""
+    <div class=\"review-table-wrapper\">
+        <table class=\"review-table\">
+            <thead>
+                <tr><th>序号</th>{header_html}</tr>
+            </thead>
+            <tbody>
+                {''.join(rows_html)}
+            </tbody>
+        </table>
+    </div>
+    """
+
+
 # 获取数据函数
 def get_data(service_func, authors=None, project_names=None, updated_at_gte=None, updated_at_lte=None, columns=None):
     df = service_func(authors=authors, project_names=project_names, updated_at_gte=updated_at_gte,
@@ -286,6 +364,50 @@ st.markdown(
     }
     .pro-link-wrap .pro-link {
         max-width: 100%;
+    }
+    .review-table-wrapper {
+        overflow-x: auto;
+        overflow-y: auto;
+        margin-top: 1rem;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fff;
+    }
+    .review-table-wrapper::-webkit-scrollbar {
+        width: 16px;
+        height: 16px;
+    }
+    .review-table-wrapper::-webkit-scrollbar-track {
+        background: #f1f3f5;
+        border-radius: 8px;
+    }
+    .review-table-wrapper::-webkit-scrollbar-thumb {
+        background: #b8c0cc;
+        border-radius: 8px;
+    }
+    .review-table-wrapper::-webkit-scrollbar-thumb:hover {
+        background: #98a2b3;
+    }
+    .review-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+    }
+    .review-table thead th {
+        position: sticky;
+        top: 0;
+        background: #f8f9fb;
+        z-index: 1;
+    }
+    .review-table th,
+    .review-table td {
+        border: 1px solid #e5e7eb;
+        padding: 10px 12px;
+        text-align: left;
+        max-width: 220px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
     </style>
     """,
@@ -434,6 +556,7 @@ def generate_author_score_chart(df):
     st.pyplot(fig2)
 
 
+
 def generate_author_code_line_chart(df):
     if df.empty:
         st.info("没有数据可供展示")
@@ -515,7 +638,7 @@ def main_page():
     else:
         mr_tab = st.container()
 
-    def display_data(tab, service_func, columns, column_config):
+    def display_data(tab, service_func, columns, ordered_columns, headers, score_column):
         with tab:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -542,11 +665,13 @@ def main_page():
                             updated_at_lte=int(end_datetime.timestamp()), columns=columns)
             df = pd.DataFrame(data)
 
-            st.data_editor(
-                df,
-                use_container_width=True,
-                column_config=column_config
-            )
+            if df.empty:
+                st.info("没有数据可供展示")
+            else:
+                st.markdown(
+                    build_indexed_html_table(df, ordered_columns, headers, score_column),
+                    unsafe_allow_html=True
+                )
 
             total_records = len(df)
             average_score = df["score"].mean() if not df.empty else 0
@@ -581,58 +706,31 @@ def main_page():
                     st.info("无法显示代码行数图表：缺少必要的数据列")
 
     # Merge Request 数据展示
-    mr_columns = ["project_name", "author_name", "author", "source_branch", "target_branch", "updated_at", "commit_messages", "delta",
-                  "score",
-                  "url", 'additions', 'deletions']
+    mr_columns = [
+        "commit_messages", "score", "author_name", "project_name", "source_branch", "target_branch",
+        "updated_at", "delta", "url", 'additions', 'deletions', "author"
+    ]
+    mr_ordered_columns = [
+        "commit_messages", "score", "author_name", "project_name", "source_branch", "target_branch",
+        "updated_at", "delta"
+    ]
+    mr_headers = ["提交信息", "得分", "开发者", "项目名称", "源分支", "目标分支", "更新时间", "delta"]
 
-    mr_column_config = {
-        "project_name": "项目名称",
-        "author_name": "开发者",
-        "author": None,
-        "source_branch": "源分支",
-        "target_branch": "目标分支",
-        "updated_at": "更新时间",
-        "commit_messages": "提交信息",
-        "score": st.column_config.ProgressColumn(
-            "得分",
-            format="%f",
-            min_value=0,
-            max_value=100,
-        ),
-        "url": st.column_config.LinkColumn(
-            "操作",
-            max_chars=100,
-            display_text="查看详情"
-        ),
-        "additions": None,
-        "deletions": None,
-    }
-
-    display_data(mr_tab, ReviewService().get_mr_review_logs, mr_columns, mr_column_config)
+    display_data(mr_tab, ReviewService().get_mr_review_logs, mr_columns, mr_ordered_columns, mr_headers, "score")
 
     # Push 数据展示
     if show_push_tab:
-        push_columns = ["project_name", "author_name", "author", "branch", "updated_at", "commit_messages", "delta", "score",
-                        'additions', 'deletions']
+        push_columns = [
+            "commit_messages", "score", "author_name", "project_name", "branch", "updated_at", "delta",
+            'additions', 'deletions', "author"
+        ]
+        push_ordered_columns = [
+            "commit_messages", "score", "author_name", "project_name", "branch", "updated_at", "delta"
+        ]
+        push_headers = ["提交信息", "得分", "开发者", "项目名称", "分支", "更新时间", "delta"]
 
-        push_column_config = {
-            "project_name": "项目名称",
-            "author_name": "开发者",
-            "author": None,
-            "branch": "分支",
-            "updated_at": "更新时间",
-            "commit_messages": "提交信息",
-            "score": st.column_config.ProgressColumn(
-                "得分",
-                format="%f",
-                min_value=0,
-                max_value=100,
-            ),
-            "additions": None,
-            "deletions": None,
-        }
-
-        display_data(push_tab, ReviewService().get_push_review_logs, push_columns, push_column_config)
+        display_data(push_tab, ReviewService().get_push_review_logs, push_columns, push_ordered_columns, push_headers,
+                     "score")
 
 
 # 应用入口
