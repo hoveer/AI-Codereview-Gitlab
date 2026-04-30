@@ -186,6 +186,215 @@ class TestNoteHandler(TestCase):
         called_url = mock_post.call_args[0][0]
         self.assertTrue(called_url.endswith('/merge_requests/1/notes'))
 
+    def test_parse_author_fields(self):
+        """webhook payload 中的 user 字段应被正确解析为作者信息"""
+        data = self._make_webhook_data()
+        data['user'] = {'id': 7, 'username': 'alice', 'name': 'Alice A'}
+        handler = NoteHandler(data, '', '')
+        self.assertEqual(handler.author_username, 'alice')
+        self.assertEqual(handler.author_id, 7)
+        self.assertEqual(handler.author_name, 'Alice A')
+
+    def test_parse_author_fields_missing(self):
+        """payload 不含 user 字段时，作者字段应为默认空值"""
+        data = self._make_webhook_data()
+        handler = NoteHandler(data, '', '')
+        self.assertEqual(handler.author_username, '')
+        self.assertIsNone(handler.author_id)
+        self.assertEqual(handler.author_name, '')
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.get')
+    def test_get_discussion_notes_success(self, mock_get):
+        """get_discussion_notes 成功时应返回 notes 列表"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {'notes': [{'id': 1, 'body': 'hello'}]}
+        mock_get.return_value = mock_resp
+
+        data = self._make_webhook_data()
+        handler = NoteHandler(data, 'token', 'https://gitlab.example.com')
+        notes = handler.get_discussion_notes()
+
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]['id'], 1)
+        called_url = mock_get.call_args[0][0]
+        self.assertIn('/discussions/abc123', called_url)
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.get')
+    def test_get_discussion_notes_api_failure(self, mock_get):
+        """get_discussion_notes API 调用失败时应返回空列表"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = 'Not found'
+        mock_get.return_value = mock_resp
+
+        data = self._make_webhook_data()
+        handler = NoteHandler(data, 'token', 'https://gitlab.example.com')
+        notes = handler.get_discussion_notes()
+
+        self.assertEqual(notes, [])
+
+    def test_get_discussion_notes_no_discussion_id(self):
+        """discussion_id 为空时 get_discussion_notes 应直接返回空列表"""
+        data = self._make_webhook_data()
+        data['object_attributes']['discussion_id'] = None
+        handler = NoteHandler(data, 'token', 'https://gitlab.example.com')
+        notes = handler.get_discussion_notes()
+        self.assertEqual(notes, [])
+
+
+class TestHandleNoteEventAutoChat(TestCase):
+    """测试 handle_note_event 的 discussion 自动续聊触发逻辑"""
+
+    def _make_webhook(self, note='hello', author='alice', discussion_id='disc1', note_id=99):
+        return {
+            'object_kind': 'note',
+            'project_id': 10,
+            'project': {'id': 10, 'name': 'myproject'},
+            'user': {'id': 5, 'username': author, 'name': 'Alice'},
+            'object_attributes': {
+                'id': note_id,
+                'note': note,
+                'noteable_type': 'MergeRequest',
+                'discussion_id': discussion_id,
+                'action': 'create',
+            },
+            'merge_request': {
+                'id': 200,
+                'iid': 3,
+                'source_branch': 'feature',
+                'target_branch': 'main',
+                'last_commit': {'id': 'abc'},
+                'url': 'https://gitlab.example.com/proj/-/merge_requests/3',
+            },
+        }
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_bot_self_authored_note_ignored(self, MockHandler, MockChatReviewer):
+        """机器人自己发出的评论不应触发任何 AI 处理"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'aibot'
+        mock_handler.note = 'AI generated reply'
+        MockHandler.return_value = mock_handler
+
+        handle_note_event(self._make_webhook(author='aibot', note='AI generated reply'), '', '', '')
+
+        MockChatReviewer.return_value.chat.assert_not_called()
+        mock_handler.add_merge_request_note.assert_not_called()
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_explicit_mention_triggers_chat(self, MockHandler, MockChatReviewer):
+        """显式 @机器人 + 文本 仍然正常触发对话模式"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = '@aibot what do you think?'
+        mock_handler.note_id = 99
+        mock_handler.get_merge_request_changes.return_value = []
+        mock_handler.get_merge_request_commits.return_value = []
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.return_value = 'AI answer'
+        MockChatReviewer.return_value = mock_chat
+
+        handle_note_event(self._make_webhook(note='@aibot what do you think?'), '', '', '')
+
+        mock_chat.chat.assert_called_once()
+        mock_handler.add_merge_request_note.assert_called_once_with('AI answer')
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_auto_chat_triggers_when_last_note_is_from_bot(self, MockHandler, MockChatReviewer):
+        """无显式 @机器人，但 discussion 中上一条评论来自机器人 => 自动触发对话"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = 'Can you elaborate?'
+        mock_handler.note_id = 99
+        mock_handler.discussion_id = 'disc1'
+        mock_handler.get_discussion_notes.return_value = [
+            {'id': 10, 'body': 'first comment', 'author': {'username': 'alice'}},
+            {'id': 20, 'body': 'AI reply', 'author': {'username': 'aibot'}},
+            {'id': 99, 'body': 'Can you elaborate?', 'author': {'username': 'alice'}},
+        ]
+        mock_handler.get_merge_request_changes.return_value = []
+        mock_handler.get_merge_request_commits.return_value = []
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.return_value = 'elaborated AI answer'
+        MockChatReviewer.return_value = mock_chat
+
+        handle_note_event(self._make_webhook(note='Can you elaborate?'), '', '', '')
+
+        mock_chat.chat.assert_called_once()
+        call_kwargs = mock_chat.chat.call_args[1]
+        self.assertEqual(call_kwargs['user_question'], 'Can you elaborate?')
+        mock_handler.add_merge_request_note.assert_called_once_with('elaborated AI answer')
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_no_auto_chat_when_last_note_not_from_bot(self, MockHandler, MockChatReviewer):
+        """无显式 @机器人，discussion 中上一条评论不是机器人 => 不触发"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = 'I agree'
+        mock_handler.note_id = 99
+        mock_handler.discussion_id = 'disc1'
+        mock_handler.get_discussion_notes.return_value = [
+            {'id': 10, 'body': 'AI comment', 'author': {'username': 'aibot'}},
+            {'id': 50, 'body': 'human reply', 'author': {'username': 'bob'}},
+            {'id': 99, 'body': 'I agree', 'author': {'username': 'alice'}},
+        ]
+        MockHandler.return_value = mock_handler
+
+        handle_note_event(self._make_webhook(note='I agree'), '', '', '')
+
+        MockChatReviewer.return_value.chat.assert_not_called()
+        mock_handler.add_merge_request_note.assert_not_called()
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_no_auto_chat_without_discussion_id(self, MockHandler, MockChatReviewer):
+        """无显式 @机器人，且 discussion_id 为空 => 不触发"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = 'just a comment'
+        mock_handler.note_id = 99
+        mock_handler.discussion_id = None
+        MockHandler.return_value = mock_handler
+
+        handle_note_event(self._make_webhook(note='just a comment', discussion_id=None), '', '', '')
+
+        MockChatReviewer.return_value.chat.assert_not_called()
+        mock_handler.add_merge_request_note.assert_not_called()
+
 
 if __name__ == '__main__':
     main()
