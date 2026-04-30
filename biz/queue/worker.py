@@ -170,7 +170,9 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             commit_ids = [c.get('id') for c in commits]
             if prev_commit_id in commit_ids:
                 prev_idx = commit_ids.index(prev_commit_id)
-                new_commits_since_last_review = commits[:prev_idx]  # GitLab 按最新在前排序
+                # GitLab 按最新在前排序；commits[:prev_idx] 取比 prev_commit_id 更新的提交。
+                # 因 prev_commit_id != last_commit_id（上方已过滤），prev_idx 不会为 0。
+                new_commits_since_last_review = commits[:prev_idx]
                 if new_commits_since_last_review and all(
                     len(c.get('parent_ids', [])) > 1 for c in new_commits_since_last_review
                 ):
@@ -223,6 +225,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                 logger.warning(f"Failed to award eyes emoji to placeholder note: {_e}")
 
         # review 代码 - 使用非合并提交的消息作为上下文，过滤掉"Merge branch X into Y"等无实际意义的提交
+        # 若所有提交均为合并提交（极罕见场景），则退回使用全量 commits，保证上下文不为空
         commits_for_context = non_merge_commits if non_merge_commits else commits
         commits_text = ';'.join(commit.get('message', '').strip() for commit in commits_for_context)
         if is_incremental:
