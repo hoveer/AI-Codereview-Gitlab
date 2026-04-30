@@ -293,6 +293,7 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
     处理 GitLab note（评论）Webhook 事件，支持 @机器人 交互：
     - 仅 @机器人 => 触发 MR 代码审查
     - @机器人 + 额外文本 => 对话式 AI 回复
+    - 直接回复 AI 所在 discussion（最近一条评论来自机器人）=> 对话式 AI 回复
     """
     bot_username = os.environ.get('GITLAB_BOT_USERNAME', '').strip()
     if not bot_username:
@@ -317,11 +318,63 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             logger.info(f"Note event action={handler.action!r}, only 'create' actions are handled.")
             return
 
+        # 排除机器人自己发出的评论，防止 discussion 自动续聊形成自触发循环
+        if handler.author_username and handler.author_username.lower() == bot_username.lower():
+            logger.info("Note event: note authored by bot itself, ignored.")
+            return
+
         note_body = handler.note or ''
         is_mentioned, extra_text = parse_bot_mention(note_body, bot_username)
 
         if not is_mentioned:
-            logger.info("Note event: bot not mentioned, ignored.")
+            # 无显式 @机器人，尝试 discussion 线程续聊自动触发（保守规则：仅当上一条评论来自机器人）
+            if not handler.discussion_id:
+                logger.info("Note event: bot not mentioned and no discussion_id, ignored.")
+                return
+
+            try:
+                discussion_notes = handler.get_discussion_notes()
+            except Exception as e:
+                logger.warning(f"Note event: failed to fetch discussion notes ({type(e).__name__}): {e}, skipping auto-chat.")
+                return
+
+            if not discussion_notes:
+                logger.info("Note event: discussion has no notes, skipping auto-chat.")
+                return
+
+            # 找到当前 note 之前的历史 notes（排除当前 note 自身）
+            current_note_id = handler.note_id
+            prior_notes = [n for n in discussion_notes if n.get('id') != current_note_id]
+            if not prior_notes:
+                logger.info("Note event: no prior notes in discussion, skipping auto-chat.")
+                return
+
+            # 仅当最近一条历史 note 来自机器人时才自动触发，避免人类互相讨论被误触发
+            last_prior_note = prior_notes[-1]
+            last_author = last_prior_note.get('author', {}).get('username', '')
+            if last_author.lower() != bot_username.lower():
+                logger.info(
+                    f"Note event: last prior discussion note author='{last_author}', not bot, skipping auto-chat."
+                )
+                return
+
+            auto_chat_text = note_body.strip()
+            if not auto_chat_text:
+                logger.info("Note event: auto-chat triggered but note body is empty, ignored.")
+                return
+
+            logger.info("Note event: auto-chat triggered (last prior discussion note is from bot).")
+            changes = handler.get_merge_request_changes()
+            changes = filter_changes(changes)
+            commits = handler.get_merge_request_commits()
+            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            diffs_text = str(changes) if changes else ''
+            reply = MrChatReviewer().chat(
+                user_question=auto_chat_text,
+                diffs_text=diffs_text,
+                commits_text=commits_text,
+            )
+            handler.add_merge_request_note(reply)
             return
 
         if not extra_text:

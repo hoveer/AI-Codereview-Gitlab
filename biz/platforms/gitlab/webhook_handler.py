@@ -529,6 +529,9 @@ class NoteHandler:
         self.source_branch = ''
         self.target_branch = ''
         self.last_commit_id = ''
+        self.author_username = ''
+        self.author_id = None
+        self.author_name = ''
         self._parse()
 
     def _parse(self):
@@ -544,12 +547,38 @@ class NoteHandler:
         self.discussion_id = object_attributes.get('discussion_id')
         self.action = object_attributes.get('action', '')
 
+        user = self.webhook_data.get('user', {})
+        self.author_username = user.get('username', '')
+        self.author_id = user.get('id')
+        self.author_name = user.get('name', '')
+
         if self.noteable_type == 'MergeRequest':
             mr = self.webhook_data.get('merge_request', {})
             self.merge_request_iid = mr.get('iid')
             self.source_branch = mr.get('source_branch', '')
             self.target_branch = mr.get('target_branch', '')
             self.last_commit_id = mr.get('last_commit', {}).get('id', '')
+
+    def get_discussion_notes(self) -> list:
+        """获取当前 MR discussion 的所有 notes。
+
+        若 discussion_id 或 merge_request_iid 未设置，则返回空列表。
+        失败时返回空列表（调用方应按 fail-safe 处理）。
+        """
+        if not self.discussion_id or not self.merge_request_iid:
+            return []
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}"
+            f"/discussions/{self.discussion_id}"
+        )
+        headers = {'Private-Token': self.gitlab_token}
+        response = requests.get(url, headers=headers, verify=False)
+        logger.debug(f"NoteHandler get discussion notes: {response.status_code}, URL: {url}")
+        if response.status_code == 200:
+            return response.json().get('notes', [])
+        logger.warning(f"NoteHandler failed to get discussion: {response.status_code}, {response.text}")
+        return []
 
     def get_merge_request_changes(self) -> list:
         """获取关联 MR 的代码变更列表（仅当 noteable_type 为 MergeRequest 时有效）"""
