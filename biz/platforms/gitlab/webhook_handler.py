@@ -666,6 +666,51 @@ class NoteHandler:
         else:
             logger.error(f"NoteHandler: Failed to add note: {response.status_code}, {response.text}")
 
+    def create_mr_note(self, body: str):
+        """创建占位评论并返回其 note ID。
+
+        若存在 discussion_id，则在讨论线程内创建回复；否则创建顶层 MR 评论。
+        成功返回 note ID，失败返回 None。
+        """
+        if not self.merge_request_iid:
+            logger.error("NoteHandler: merge_request_iid is not set, cannot create note.")
+            return None
+
+        if self.discussion_id:
+            url = urljoin(
+                f"{self.gitlab_url}/",
+                f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}"
+                f"/discussions/{self.discussion_id}/notes"
+            )
+        else:
+            url = urljoin(
+                f"{self.gitlab_url}/",
+                f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes"
+            )
+        headers = {'Private-Token': self.gitlab_token, 'Content-Type': 'application/json'}
+        response = requests.post(url, headers=headers, json={'body': body}, verify=False)
+        logger.debug(f"NoteHandler create note: {response.status_code}")
+        if response.status_code == 201:
+            note_id = response.json().get('id')
+            logger.info(f"NoteHandler: placeholder note created with id={note_id}.")
+            return note_id
+        logger.error(f"NoteHandler: Failed to create note: {response.status_code}, {response.text}")
+        return None
+
+    def update_mr_note(self, note_id: int, body: str) -> bool:
+        """编辑已有 MR note，返回是否成功。"""
+        url = urljoin(
+            f"{self.gitlab_url}/",
+            f"api/v4/projects/{self.project_id}/merge_requests/{self.merge_request_iid}/notes/{note_id}"
+        )
+        headers = {'Private-Token': self.gitlab_token, 'Content-Type': 'application/json'}
+        response = requests.put(url, headers=headers, json={'body': body}, verify=False)
+        logger.debug(f"NoteHandler update note {note_id}: {response.status_code}")
+        if response.status_code == 200:
+            return True
+        logger.error(f"NoteHandler: Failed to update note {note_id}: {response.status_code}, {response.text}")
+        return False
+
     def award_emoji_to_note(self, note_id: int, emoji_name: str):
         """为 MR note 添加表情，返回 award ID，失败则返回 None。"""
         url = urljoin(
