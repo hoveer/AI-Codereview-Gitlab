@@ -149,12 +149,36 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                 logger.info(f"Merge Request with last_commit_id {last_commit_id} already exists, skipping review for {project_name}.")
                 return
 
+        # 获取 Merge Request 的 commits（提前获取以支持增量审查的合并提交过滤）
+        commits = handler.get_merge_request_commits()
+        if not commits:
+            logger.error('Failed to get commits')
+            return
+
+        # 过滤合并提交（merge commits），合并提交的 parent_ids 长度大于 1
+        # 合并提交是将其他分支合入当前分支产生的提交，其代码变更通常已在相应分支的审查中处理过
+        non_merge_commits = [c for c in commits if len(c.get('parent_ids', [])) <= 1]
+
         # 尝试增量审核：获取上次审核的 commit id，若存在则只审核新增部分
         is_incremental = False
         changes = None
         prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch, target_branch,
                                                                      mr_iid=mr_iid)
         if prev_commit_id and last_commit_id and prev_commit_id != last_commit_id:
+            # 检测自上次审核以来的新提交是否全部为合并提交（合入其他分支的操作）
+            # 若是，则这些变更已在源分支的推送审查或其他 MR 审查中处理过，跳过本次审查以避免重复审核
+            commit_ids = [c.get('id') for c in commits]
+            if prev_commit_id in commit_ids:
+                prev_idx = commit_ids.index(prev_commit_id)
+                new_commits_since_last_review = commits[:prev_idx]  # GitLab 按最新在前排序
+                if new_commits_since_last_review and all(
+                    len(c.get('parent_ids', [])) > 1 for c in new_commits_since_last_review
+                ):
+                    logger.info(
+                        "All new commits since last review are merge commits (merging other branches), "
+                        "skipping review to avoid duplicate review of already-reviewed code."
+                    )
+                    return
             try:
                 incremental_diffs = handler.repository_compare(prev_commit_id, last_commit_id)
                 if incremental_diffs:
@@ -184,12 +208,6 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         additions = sum(item.get('additions', 0) for item in changes)
         deletions = sum(item.get('deletions', 0) for item in changes)
 
-        # 获取Merge Request的commits
-        commits = handler.get_merge_request_commits()
-        if not commits:
-            logger.error('Failed to get commits')
-            return
-
         # 创建占位评论，并在其上添加 eyes 表情，表示审核正在进行中
         placeholder_note_id = None
         placeholder_eyes_added = False
@@ -204,8 +222,9 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             except Exception as _e:
                 logger.warning(f"Failed to award eyes emoji to placeholder note: {_e}")
 
-        # review 代码
-        commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+        # review 代码 - 使用非合并提交的消息作为上下文，过滤掉"Merge branch X into Y"等无实际意义的提交
+        commits_for_context = non_merge_commits if non_merge_commits else commits
+        commits_text = ';'.join(commit.get('message', '').strip() for commit in commits_for_context)
         if is_incremental:
             commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
         try:
