@@ -18,6 +18,81 @@ _LOW_SCORE_BLOCK_DEFAULT_THRESHOLD = 60
 _REVIEW_SCORE_HIGH_THRESHOLD = 90   # score > this → tada emoji
 _REVIEW_SCORE_LOW_THRESHOLD = 60    # score < this → cold_sweat emoji
 
+def _run_ai_with_placeholder(
+        *,
+        create_note_fn,
+        update_note_fn,
+        award_emoji_fn,
+        remove_emoji_fn,
+        fallback_note_fn,
+        placeholder_text: str,
+        ai_fn,
+        result_prefix: str = '',
+        error_text: str = "⚠️ AI处理未能完成，请稍后重试。",
+):
+    """统一的 AI 回复生命周期：创建占位 → 加 eyes 表情 → 调用 AI → 编辑回复 → 清理表情。
+
+    失败时将占位评论更新为错误提示，移除 eyes 表情，并重新抛出异常。
+
+    Returns:
+        (note_for_emoji, result)
+        note_for_emoji: 最终写入结果的 note ID（用于后续添加评分表情），若回退为新建评论则为 None。
+        result: AI 生成的结果文本。
+    """
+    placeholder_note_id = None
+    placeholder_eyes_added = False
+    try:
+        placeholder_note_id = create_note_fn(placeholder_text)
+    except Exception as _e:
+        logger.warning(f"Failed to create placeholder note: {_e}")
+    if placeholder_note_id:
+        try:
+            award_id = award_emoji_fn(placeholder_note_id, "eyes")
+            placeholder_eyes_added = award_id is not None
+        except Exception as _e:
+            logger.warning(f"Failed to award eyes emoji to placeholder note: {_e}")
+
+    try:
+        result = ai_fn()
+    except Exception:
+        # 清理占位评论及 eyes 表情，避免"处理中"状态永久停留
+        if placeholder_note_id:
+            try:
+                update_note_fn(placeholder_note_id, error_text)
+            except Exception as _e:
+                logger.warning(f"Failed to update placeholder note during error cleanup: {_e}")
+            if placeholder_eyes_added:
+                try:
+                    remove_emoji_fn(placeholder_note_id, "eyes")
+                except Exception as _e:
+                    logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
+        raise
+
+    # 将结果写入占位评论（编辑），失败则回退为新建评论
+    note_for_emoji = placeholder_note_id
+    result_body = f'{result_prefix}{result}' if result_prefix else result
+    if placeholder_note_id:
+        try:
+            updated = update_note_fn(placeholder_note_id, result_body)
+            if not updated:
+                raise RuntimeError("update_note returned False")
+        except Exception as _e:
+            logger.warning(f"Failed to update placeholder note, falling back to new note: {_e}")
+            fallback_note_fn(result_body)
+            note_for_emoji = None
+    else:
+        fallback_note_fn(result_body)
+
+    # 移除 eyes 表情
+    if placeholder_note_id and placeholder_eyes_added:
+        try:
+            remove_emoji_fn(placeholder_note_id, "eyes")
+        except Exception as _e:
+            logger.warning(f"Failed to remove eyes emoji: {_e}")
+
+    return note_for_emoji, result
+
+
 def _try_block_mr_if_low_score(handler: MergeRequestHandler, review_result: str):
     """低分阻止合并：若 AI 审核总分低于阈值，在 MR 中创建未解决讨论。
 
@@ -210,62 +285,25 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         additions = sum(item.get('additions', 0) for item in changes)
         deletions = sum(item.get('deletions', 0) for item in changes)
 
-        # 创建占位评论，并在其上添加 eyes 表情，表示审核正在进行中
-        placeholder_note_id = None
-        placeholder_eyes_added = False
-        try:
-            placeholder_note_id = handler.create_mr_note("👀 AI正在审核中...")
-        except Exception as _e:
-            logger.warning(f"Failed to create placeholder note: {_e}")
-        if placeholder_note_id:
-            try:
-                award_id = handler.award_emoji_to_note(placeholder_note_id, "eyes")
-                placeholder_eyes_added = award_id is not None
-            except Exception as _e:
-                logger.warning(f"Failed to award eyes emoji to placeholder note: {_e}")
-
         # review 代码 - 使用非合并提交的消息作为上下文，过滤掉"Merge branch X into Y"等无实际意义的提交
         # 若所有提交均为合并提交（极罕见场景），则退回使用全量 commits，保证上下文不为空
         commits_for_context = non_merge_commits if non_merge_commits else commits
         commits_text = ';'.join(commit.get('message', '').strip() for commit in commits_for_context)
         if is_incremental:
             commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
-        try:
-            review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
-        except Exception:
-            # 清理占位评论及 eyes 表情，避免"审核中"状态永久停留
-            if placeholder_note_id:
-                try:
-                    handler.update_mr_note(placeholder_note_id, "⚠️ AI审核未能完成，请稍后重试。")
-                except Exception as _e:
-                    logger.warning(f"Failed to update placeholder note during error cleanup: {_e}")
-                if placeholder_eyes_added:
-                    try:
-                        handler.remove_note_award_emoji(placeholder_note_id, "eyes")
-                    except Exception as _e:
-                        logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
-            raise
 
-        # 将review结果写入占位评论（编辑），失败则回退为新建评论
-        note_for_emoji = placeholder_note_id
-        if placeholder_note_id:
-            try:
-                updated = handler.update_mr_note(placeholder_note_id, f'Auto Review Result: \n{review_result}')
-                if not updated:
-                    raise RuntimeError("update_mr_note returned False")
-            except Exception as _e:
-                logger.warning(f"Failed to update placeholder note, falling back to new note: {_e}")
-                handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
-                note_for_emoji = None
-        else:
-            handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
-
-        # 移除 eyes 表情
-        if placeholder_note_id and placeholder_eyes_added:
-            try:
-                handler.remove_note_award_emoji(placeholder_note_id, "eyes")
-            except Exception as _e:
-                logger.warning(f"Failed to remove eyes emoji: {_e}")
+        # 创建占位评论 → AI 审核 → 编辑为正式结果（统一生命周期）
+        note_for_emoji, review_result = _run_ai_with_placeholder(
+            create_note_fn=handler.create_mr_note,
+            update_note_fn=handler.update_mr_note,
+            award_emoji_fn=handler.award_emoji_to_note,
+            remove_emoji_fn=handler.remove_note_award_emoji,
+            fallback_note_fn=lambda body: handler.add_merge_request_notes(body),
+            placeholder_text="👀 AI正在审核中...",
+            ai_fn=lambda: CodeReviewer().review_and_strip_code(str(changes), commits_text),
+            result_prefix='Auto Review Result: \n',
+            error_text="⚠️ AI审核未能完成，请稍后重试。",
+        )
 
         # 根据评分添加结果表情（仅当占位评论成功编辑时）
         if note_for_emoji:
@@ -391,12 +429,19 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             commits = handler.get_merge_request_commits()
             commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
             diffs_text = str(changes) if changes else ''
-            reply = MrChatReviewer().chat(
-                user_question=auto_chat_text,
-                diffs_text=diffs_text,
-                commits_text=commits_text,
+            _run_ai_with_placeholder(
+                create_note_fn=handler.create_mr_note,
+                update_note_fn=handler.update_mr_note,
+                award_emoji_fn=handler.award_emoji_to_note,
+                remove_emoji_fn=handler.remove_note_award_emoji,
+                fallback_note_fn=lambda body: handler.add_merge_request_note(body),
+                placeholder_text="👀 AI正在思考中...",
+                ai_fn=lambda: MrChatReviewer().chat(
+                    user_question=auto_chat_text,
+                    diffs_text=diffs_text,
+                    commits_text=commits_text,
+                ),
             )
-            handler.add_merge_request_note(reply)
             return
 
         if not extra_text:
@@ -455,46 +500,30 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             if is_incremental:
                 commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
 
-            # 为触发 note 添加 eyes 表情，表示审核正在进行中
-            trigger_note_id = handler.note_id
-            trigger_eyes_added = False
-            if trigger_note_id:
-                try:
-                    award_id = handler.award_emoji_to_note(trigger_note_id, "eyes")
-                    trigger_eyes_added = award_id is not None
-                except Exception as _e:
-                    logger.warning(f"Failed to award eyes emoji to trigger note: {_e}")
-
-            try:
-                review_result = CodeReviewer().review_and_strip_code(str(changes), commits_text)
-                handler.add_merge_request_note(f'Auto Review Result: \n{review_result}')
-            except Exception:
-                # 清理 eyes 后重新抛出
-                if trigger_note_id and trigger_eyes_added:
-                    try:
-                        handler.remove_note_award_emoji(trigger_note_id, "eyes")
-                    except Exception as _e:
-                        logger.warning(f"Failed to remove eyes emoji during error cleanup: {_e}")
-                raise
-
-            # 移除 eyes 表情
-            if trigger_note_id and trigger_eyes_added:
-                try:
-                    handler.remove_note_award_emoji(trigger_note_id, "eyes")
-                except Exception as _e:
-                    logger.warning(f"Failed to remove eyes emoji: {_e}")
+            # 创建占位评论 → AI 审核 → 编辑为正式结果（统一生命周期）
+            note_for_emoji, review_result = _run_ai_with_placeholder(
+                create_note_fn=handler.create_mr_note,
+                update_note_fn=handler.update_mr_note,
+                award_emoji_fn=handler.award_emoji_to_note,
+                remove_emoji_fn=handler.remove_note_award_emoji,
+                fallback_note_fn=lambda body: handler.add_merge_request_note(body),
+                placeholder_text="👀 AI正在审核中...",
+                ai_fn=lambda: CodeReviewer().review_and_strip_code(str(changes), commits_text),
+                result_prefix='Auto Review Result: \n',
+                error_text="⚠️ AI审核未能完成，请稍后重试。",
+            )
 
             # 根据评分添加结果表情
-            if trigger_note_id:
+            if note_for_emoji:
                 try:
                     score = CodeReviewer.extract_review_score(review_result)
                     if score is not None:
                         if score > _REVIEW_SCORE_HIGH_THRESHOLD:
-                            handler.award_emoji_to_note(trigger_note_id, "tada")
+                            handler.award_emoji_to_note(note_for_emoji, "tada")
                         elif score < _REVIEW_SCORE_LOW_THRESHOLD:
-                            handler.award_emoji_to_note(trigger_note_id, "cold_sweat")
+                            handler.award_emoji_to_note(note_for_emoji, "cold_sweat")
                 except Exception as _e:
-                    logger.warning(f"Failed to apply score emoji to trigger note: {_e}")
+                    logger.warning(f"Failed to apply score emoji to review note: {_e}")
 
             # 保存审核记录，使后续触发可以正确进行增量判断
             if mr_ident_available:
@@ -528,12 +557,19 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
             diffs_text = str(changes) if changes else ''
 
-            reply = MrChatReviewer().chat(
-                user_question=extra_text,
-                diffs_text=diffs_text,
-                commits_text=commits_text,
+            _run_ai_with_placeholder(
+                create_note_fn=handler.create_mr_note,
+                update_note_fn=handler.update_mr_note,
+                award_emoji_fn=handler.award_emoji_to_note,
+                remove_emoji_fn=handler.remove_note_award_emoji,
+                fallback_note_fn=lambda body: handler.add_merge_request_note(body),
+                placeholder_text="👀 AI正在思考中...",
+                ai_fn=lambda: MrChatReviewer().chat(
+                    user_question=extra_text,
+                    diffs_text=diffs_text,
+                    commits_text=commits_text,
+                ),
             )
-            handler.add_merge_request_note(reply)
 
     except Exception as e:
         error_message = f'AI Code Review note 事件处理出现未知错误: {str(e)}\n{traceback.format_exc()}'

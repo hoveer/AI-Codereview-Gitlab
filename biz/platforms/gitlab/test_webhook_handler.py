@@ -351,6 +351,81 @@ class TestHandleNoteEventAutoChat(TestCase):
     @patch('biz.queue.worker.MrChatReviewer')
     @patch('biz.queue.worker.NoteHandler')
     @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_explicit_mention_triggers_chat(self, MockHandler, MockChatReviewer):
+        """显式 @机器人 + 文本 仍然正常触发对话模式，并使用占位评论编辑流程"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = '@aibot what do you think?'
+        mock_handler.note_id = 99
+        mock_handler.create_mr_note.return_value = 200
+        mock_handler.update_mr_note.return_value = True
+        mock_handler.get_merge_request_changes.return_value = []
+        mock_handler.get_merge_request_commits.return_value = []
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.return_value = 'AI answer'
+        MockChatReviewer.return_value = mock_chat
+
+        handle_note_event(self._make_webhook(note='@aibot what do you think?'), '', '', '')
+
+        mock_chat.chat.assert_called_once()
+        # 应创建占位评论，然后编辑为最终回复，而不是直接 add_merge_request_note
+        mock_handler.create_mr_note.assert_called_once_with('👀 AI正在思考中...')
+        mock_handler.update_mr_note.assert_called_once()
+        update_call_body = mock_handler.update_mr_note.call_args[0][1]
+        self.assertIn('AI answer', update_call_body)
+        # add_merge_request_note 不应被直接调用作为最终回复
+        mock_handler.add_merge_request_note.assert_not_called()
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_auto_chat_triggers_when_last_note_is_from_bot(self, MockHandler, MockChatReviewer):
+        """无显式 @机器人，但 discussion 中上一条评论来自机器人 => 自动触发对话，使用占位评论编辑流程"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = 'Can you elaborate?'
+        mock_handler.note_id = 99
+        mock_handler.discussion_id = 'disc1'
+        mock_handler.create_mr_note.return_value = 201
+        mock_handler.update_mr_note.return_value = True
+        mock_handler.get_discussion_notes.return_value = [
+            {'id': 10, 'body': 'first comment', 'author': {'username': 'alice'}},
+            {'id': 20, 'body': 'AI reply', 'author': {'username': 'aibot'}},
+            {'id': 99, 'body': 'Can you elaborate?', 'author': {'username': 'alice'}},
+        ]
+        mock_handler.get_merge_request_changes.return_value = []
+        mock_handler.get_merge_request_commits.return_value = []
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.return_value = 'elaborated AI answer'
+        MockChatReviewer.return_value = mock_chat
+
+        handle_note_event(self._make_webhook(note='Can you elaborate?'), '', '', '')
+
+        mock_chat.chat.assert_called_once()
+        call_kwargs = mock_chat.chat.call_args[1]
+        self.assertEqual(call_kwargs['user_question'], 'Can you elaborate?')
+        # 应创建占位评论，然后编辑为最终回复
+        mock_handler.create_mr_note.assert_called_once_with('👀 AI正在思考中...')
+        mock_handler.update_mr_note.assert_called_once()
+        update_call_body = mock_handler.update_mr_note.call_args[0][1]
+        self.assertIn('elaborated AI answer', update_call_body)
+        mock_handler.add_merge_request_note.assert_not_called()
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
     def test_no_auto_chat_when_last_note_not_from_bot(self, MockHandler, MockChatReviewer):
         """无显式 @机器人，discussion 中上一条评论不是机器人 => 不触发"""
         from biz.queue.worker import handle_note_event
@@ -372,6 +447,7 @@ class TestHandleNoteEventAutoChat(TestCase):
         handle_note_event(self._make_webhook(note='I agree'), '', '', '')
 
         MockChatReviewer.return_value.chat.assert_not_called()
+        mock_handler.create_mr_note.assert_not_called()
         mock_handler.add_merge_request_note.assert_not_called()
 
     @patch('biz.queue.worker.MrChatReviewer')
@@ -393,7 +469,248 @@ class TestHandleNoteEventAutoChat(TestCase):
         handle_note_event(self._make_webhook(note='just a comment', discussion_id=None), '', '', '')
 
         MockChatReviewer.return_value.chat.assert_not_called()
+        mock_handler.create_mr_note.assert_not_called()
         mock_handler.add_merge_request_note.assert_not_called()
+
+
+class TestNoteHandlerCreateUpdateNote(TestCase):
+    """测试 NoteHandler.create_mr_note 和 update_mr_note 方法"""
+
+    def _make_webhook_data(self, discussion_id='disc1'):
+        return {
+            'object_kind': 'note',
+            'project_id': 42,
+            'project': {'id': 42},
+            'object_attributes': {
+                'note': '@bot review',
+                'noteable_type': 'MergeRequest',
+                'discussion_id': discussion_id,
+            },
+            'merge_request': {
+                'id': 100,
+                'iid': 5,
+            },
+        }
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.post')
+    def test_create_mr_note_in_discussion_thread(self, mock_post):
+        """当 discussion_id 存在时，create_mr_note 应向讨论回复接口发请求，并返回 note_id"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json.return_value = {'id': 999}
+        mock_post.return_value = mock_resp
+
+        handler = NoteHandler(self._make_webhook_data(discussion_id='abc123'),
+                              'token', 'https://gitlab.example.com')
+        note_id = handler.create_mr_note('👀 AI正在思考中...')
+
+        self.assertEqual(note_id, 999)
+        called_url = mock_post.call_args[0][0]
+        self.assertIn('/discussions/abc123/notes', called_url)
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.post')
+    def test_create_mr_note_top_level_without_discussion(self, mock_post):
+        """当 discussion_id 为空时，create_mr_note 应向顶层 notes 接口发请求，并返回 note_id"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json.return_value = {'id': 888}
+        mock_post.return_value = mock_resp
+
+        handler = NoteHandler(self._make_webhook_data(discussion_id=None),
+                              'token', 'https://gitlab.example.com')
+        note_id = handler.create_mr_note('👀 AI正在思考中...')
+
+        self.assertEqual(note_id, 888)
+        called_url = mock_post.call_args[0][0]
+        self.assertTrue(called_url.endswith('/merge_requests/5/notes'))
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.post')
+    def test_create_mr_note_failure_returns_none(self, mock_post):
+        """create_mr_note API 调用失败时应返回 None"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.text = 'Internal Server Error'
+        mock_post.return_value = mock_resp
+
+        handler = NoteHandler(self._make_webhook_data(), 'token', 'https://gitlab.example.com')
+        note_id = handler.create_mr_note('placeholder')
+
+        self.assertIsNone(note_id)
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.put')
+    def test_update_mr_note_success(self, mock_put):
+        """update_mr_note 成功时应返回 True"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_put.return_value = mock_resp
+
+        handler = NoteHandler(self._make_webhook_data(), 'token', 'https://gitlab.example.com')
+        result = handler.update_mr_note(999, 'final AI reply')
+
+        self.assertTrue(result)
+        called_url = mock_put.call_args[0][0]
+        self.assertIn('/notes/999', called_url)
+        sent_body = mock_put.call_args[1]['json']['body']
+        self.assertEqual(sent_body, 'final AI reply')
+
+    @patch('biz.platforms.gitlab.webhook_handler.requests.put')
+    def test_update_mr_note_failure_returns_false(self, mock_put):
+        """update_mr_note API 调用失败时应返回 False"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = 'Not found'
+        mock_put.return_value = mock_resp
+
+        handler = NoteHandler(self._make_webhook_data(), 'token', 'https://gitlab.example.com')
+        result = handler.update_mr_note(999, 'body')
+
+        self.assertFalse(result)
+
+
+class TestHandleNoteEventPlaceholderFlow(TestCase):
+    """测试 handle_note_event 中各场景的占位评论编辑流程"""
+
+    def _make_webhook(self, note='@aibot', author='alice', discussion_id='disc1', note_id=99):
+        return {
+            'object_kind': 'note',
+            'project_id': 10,
+            'project': {'id': 10, 'name': 'myproject'},
+            'user': {'id': 5, 'username': author, 'name': 'Alice'},
+            'object_attributes': {
+                'id': note_id,
+                'note': note,
+                'noteable_type': 'MergeRequest',
+                'discussion_id': discussion_id,
+                'action': 'create',
+            },
+            'merge_request': {
+                'id': 200,
+                'iid': 3,
+                'source_branch': 'feature',
+                'target_branch': 'main',
+                'last_commit': {'id': 'abc'},
+                'url': 'https://gitlab.example.com/proj/-/merge_requests/3',
+            },
+        }
+
+    def _make_mock_handler(self, note='@aibot', discussion_id=None):
+        mock_handler = MagicMock()
+        mock_handler.noteable_type = 'MergeRequest'
+        mock_handler.merge_request_iid = 3
+        mock_handler.action = 'create'
+        mock_handler.author_username = 'alice'
+        mock_handler.note = note
+        mock_handler.note_id = 99
+        mock_handler.discussion_id = discussion_id
+        mock_handler.source_branch = 'feature'
+        mock_handler.target_branch = 'main'
+        mock_handler.last_commit_id = 'abc'
+        mock_handler.create_mr_note.return_value = 500
+        mock_handler.update_mr_note.return_value = True
+        mock_handler.get_merge_request_changes.return_value = []
+        mock_handler.get_merge_request_commits.return_value = []
+        return mock_handler
+
+    @patch('biz.queue.worker.CodeReviewer')
+    @patch('biz.queue.worker.ReviewService')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_at_ai_review_uses_placeholder_edit(self, MockHandler, MockReview, MockCodeReviewer):
+        """@ai 触发标准审查：应先创建占位评论，AI 完成后编辑为正式结果"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = self._make_mock_handler(note='@aibot')
+        mock_handler.get_merge_request_changes.return_value = [
+            {'diff': '+line', 'new_path': 'foo.py', 'additions': 1, 'deletions': 0}
+        ]
+        MockHandler.return_value = mock_handler
+
+        mock_reviewer_instance = MagicMock()
+        mock_reviewer_instance.review_and_strip_code.return_value = 'review text'
+        MockCodeReviewer.return_value = mock_reviewer_instance
+        MockCodeReviewer.extract_review_score.return_value = None
+        MockReview.check_mr_last_commit_id_exists.return_value = False
+        MockReview.get_last_mr_review_commit_id.return_value = None
+
+        handle_note_event(self._make_webhook(note='@aibot'), '', '', '')
+
+        mock_handler.create_mr_note.assert_called_once_with('👀 AI正在审核中...')
+        mock_handler.update_mr_note.assert_called_once()
+        update_body = mock_handler.update_mr_note.call_args[0][1]
+        self.assertIn('review text', update_body)
+        self.assertIn('Auto Review Result', update_body)
+        # 直接 add_merge_request_note 不应被用于发布最终审核结果
+        mock_handler.add_merge_request_note.assert_not_called()
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_discussion_auto_chat_placeholder_in_thread(self, MockHandler, MockChatReviewer):
+        """discussion 自动续聊：占位评论应在讨论线程内创建，AI 完成后编辑"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = self._make_mock_handler(note='Please explain more', discussion_id='thread42')
+        mock_handler.create_mr_note.return_value = 300
+        mock_handler.get_discussion_notes.return_value = [
+            {'id': 10, 'body': 'bot answer', 'author': {'username': 'aibot'}},
+            {'id': 99, 'body': 'Please explain more', 'author': {'username': 'alice'}},
+        ]
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.return_value = 'detailed explanation'
+        MockChatReviewer.return_value = mock_chat
+
+        handle_note_event(self._make_webhook(note='Please explain more', discussion_id='thread42'), '', '', '')
+
+        mock_handler.create_mr_note.assert_called_once_with('👀 AI正在思考中...')
+        mock_handler.update_mr_note.assert_called_once()
+        update_body = mock_handler.update_mr_note.call_args[0][1]
+        self.assertIn('detailed explanation', update_body)
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_placeholder_fallback_to_add_note_when_create_fails(self, MockHandler, MockChatReviewer):
+        """当 create_mr_note 失败（返回 None）时，最终结果应通过 add_merge_request_note 发出"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = self._make_mock_handler(note='@aibot explain', discussion_id=None)
+        mock_handler.create_mr_note.return_value = None  # 创建占位失败
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.return_value = 'fallback reply'
+        MockChatReviewer.return_value = mock_chat
+
+        handle_note_event(self._make_webhook(note='@aibot explain'), '', '', '')
+
+        # 创建失败时应通过 add_merge_request_note 发出结果
+        mock_handler.add_merge_request_note.assert_called_once()
+        call_body = mock_handler.add_merge_request_note.call_args[0][0]
+        self.assertIn('fallback reply', call_body)
+
+    @patch('biz.queue.worker.MrChatReviewer')
+    @patch('biz.queue.worker.NoteHandler')
+    @patch.dict('os.environ', {'GITLAB_BOT_USERNAME': 'aibot'})
+    def test_ai_failure_updates_placeholder_to_error(self, MockHandler, MockChatReviewer):
+        """AI 调用失败时，占位评论应更新为错误提示，eyes 表情应被移除"""
+        from biz.queue.worker import handle_note_event
+        mock_handler = self._make_mock_handler(note='@aibot explain', discussion_id=None)
+        mock_handler.create_mr_note.return_value = 600
+        mock_handler.award_emoji_to_note.return_value = 77
+        MockHandler.return_value = mock_handler
+
+        mock_chat = MagicMock()
+        mock_chat.chat.side_effect = RuntimeError("LLM timeout")
+        MockChatReviewer.return_value = mock_chat
+
+        # 异常被顶层捕获，handle_note_event 不向外抛出
+        handle_note_event(self._make_webhook(note='@aibot explain'), '', '', '')
+
+        # 占位评论应更新为错误提示
+        mock_handler.update_mr_note.assert_called_once()
+        error_body = mock_handler.update_mr_note.call_args[0][1]
+        self.assertIn('⚠️', error_body)
+        # eyes 表情应被移除
+        mock_handler.remove_note_award_emoji.assert_called_once_with(600, 'eyes')
 
 
 if __name__ == '__main__':
