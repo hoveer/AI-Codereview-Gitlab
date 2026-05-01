@@ -233,7 +233,7 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
     def col_width(title):
         return COL_WIDTH_MAP.get(title, DEFAULT_COL_WIDTH)
 
-    idx_w = COL_WIDTH_MAP["序号"]
+    idx_w = COL_WIDTH_MAP.get("序号", DEFAULT_COL_WIDTH)
     col_tags = f'<col style="width:{idx_w}px;min-width:{idx_w}px;">'
     col_tags += ''.join(
         f'<col style="width:{col_width(t)}px;min-width:40px;">'
