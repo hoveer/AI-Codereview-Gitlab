@@ -635,6 +635,8 @@ def generate_author_score_chart(df):
     # 计算每个人员的平均分数
     author_scores = df.groupby('author_name')['score'].mean().reset_index()
     author_scores.columns = ['author_name', 'average_score']
+    # 按平均分数从高到低排序
+    author_scores = author_scores.sort_values('average_score', ascending=False).reset_index(drop=True)
 
     # 显示平均分数柱状图
     fig2, ax2 = plt.subplots(figsize=(10, 6))
