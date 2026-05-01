@@ -30,6 +30,8 @@ load_dotenv("conf/.env")
 HIGH_SCORE_COLOR = "#8CCF90"
 LOW_SCORE_COLOR = "#E6E944"
 SCORE_EMOJI_PARAM = os.getenv("SCORE_EMOJI_DISPLAY", os.getenv("SCORE_EMOJI", "1"))
+REVIEW_SCORE_HIGH_THRESHOLD = int(os.getenv("REVIEW_SCORE_HIGH_THRESHOLD", "90"))
+REVIEW_SCORE_LOW_THRESHOLD = int(os.getenv("REVIEW_SCORE_LOW_THRESHOLD", "60"))
 
 
 def set_global_font():
@@ -183,7 +185,11 @@ def get_score_emoji(score):
 def get_score_color(score):
     if pd.isna(score):
         return ""
-    return HIGH_SCORE_COLOR if score >= 80 else LOW_SCORE_COLOR
+    if score > REVIEW_SCORE_HIGH_THRESHOLD:
+        return HIGH_SCORE_COLOR
+    if score < REVIEW_SCORE_LOW_THRESHOLD:
+        return LOW_SCORE_COLOR
+    return ""
 
 
 def build_score_link(score, url):
@@ -207,11 +213,14 @@ def build_tooltip_cell(value):
 
 
 def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
-    header_html = "".join(f"<th>{html.escape(title)}</th>" for title in headers)
+    header_html = "".join(
+        f'<th>{html.escape(title)}<div class="resize-handle"></div></th>'
+        for title in headers
+    )
     rows_html = []
 
     for index, row in df.reset_index(drop=True).iterrows():
-        row_cells = [f"<td title=\"{index + 1}\">{index + 1}</td>"]
+        row_cells = [f'<td title="{index + 1}">{index + 1}</td>']
         for col in ordered_columns:
             value = row.get(col, "")
             cell_style = ""
@@ -225,10 +234,10 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
         rows_html.append(f"<tr>{''.join(row_cells)}</tr>")
 
     return f"""
-    <div class=\"review-table-wrapper\">
-        <table class=\"review-table\">
+    <div class="review-table-wrapper">
+        <table class="review-table">
             <thead>
-                <tr><th>序号</th>{header_html}</tr>
+                <tr><th>序号<div class="resize-handle"></div></th>{header_html}</tr>
             </thead>
             <tbody>
                 {''.join(rows_html)}
@@ -372,6 +381,7 @@ st.markdown(
         border: 1px solid #ddd;
         border-radius: 8px;
         background: #fff;
+        max-height: 480px; /* ~10 rows: 10 × 44px per row + header */
     }
     .review-table-wrapper::-webkit-scrollbar {
         width: 16px;
@@ -398,6 +408,10 @@ st.markdown(
         top: 0;
         background: #f8f9fb;
         z-index: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        user-select: none;
     }
     .review-table th,
     .review-table td {
@@ -409,7 +423,64 @@ st.markdown(
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    .resize-handle {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 5px;
+        height: 100%;
+        cursor: col-resize;
+        background: transparent;
+        z-index: 2;
+    }
+    .resize-handle:hover {
+        background: rgba(0, 0, 0, 0.15);
+    }
     </style>
+    <script>
+    (function() {
+        var MIN_COL_WIDTH = 40;
+        var _rs = {active: false, startX: 0, startW: 0, th: null};
+        function initTable(table) {
+            if (table.dataset.resizeReady) return;
+            table.dataset.resizeReady = '1';
+            table.querySelectorAll('thead th').forEach(function(th) {
+                var handle = th.querySelector('.resize-handle');
+                if (!handle) return;
+                handle.addEventListener('mousedown', function(e) {
+                    _rs.active = true;
+                    _rs.startX = e.clientX;
+                    _rs.startW = th.getBoundingClientRect().width;
+                    _rs.th = th;
+                    document.body.style.cursor = 'col-resize';
+                    document.body.style.userSelect = 'none';
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+            });
+        }
+        document.addEventListener('mousemove', function(e) {
+            if (!_rs.active || !_rs.th) return;
+            var newW = Math.max(MIN_COL_WIDTH, _rs.startW + (e.clientX - _rs.startX));
+            _rs.th.style.width = newW + 'px';
+            _rs.th.style.minWidth = newW + 'px';
+            _rs.th.style.maxWidth = newW + 'px';
+        });
+        document.addEventListener('mouseup', function() {
+            if (_rs.active) {
+                _rs.active = false;
+                _rs.th = null;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+        });
+        var _obs = new MutationObserver(function() {
+            document.querySelectorAll('.review-table').forEach(initTable);
+        });
+        _obs.observe(document.body, {childList: true, subtree: true});
+        document.querySelectorAll('.review-table').forEach(initTable);
+    })();
+    </script>
     """,
     unsafe_allow_html=True
 )
