@@ -13,7 +13,6 @@ import hashlib
 import hmac
 import base64
 import time
-import html
 import pandas as pd
 from dotenv import load_dotenv
 import matplotlib.pyplot as plt
@@ -182,181 +181,6 @@ def get_score_emoji(score):
     return "⚠️"
 
 
-def get_score_color(score):
-    if pd.isna(score):
-        return ""
-    if score > REVIEW_SCORE_HIGH_THRESHOLD:
-        return HIGH_SCORE_COLOR
-    if score < REVIEW_SCORE_LOW_THRESHOLD:
-        return LOW_SCORE_COLOR
-    return ""
-
-
-def build_score_link(score, url):
-    score_text = "" if pd.isna(score) else f"{float(score):.0f}"
-    emoji = get_score_emoji(score)
-    display_text = f"{emoji} {score_text}".strip() or "查看详情"
-    safe_text = html.escape(display_text)
-    safe_url = html.escape(str(url) if pd.notna(url) else "#", quote=True)
-    return (
-        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer" '
-        f'style="text-decoration:none;color:inherit;font-weight:600;">{safe_text}</a>'
-    )
-
-
-def build_tooltip_cell(value):
-    if pd.isna(value):
-        return ""
-    value_str = str(value)
-    # title tooltip 中用 &#10; 编码换行，避免属性值中出现裸换行
-    title_str = html.escape(value_str, quote=True).replace('\n', '&#10;').replace('\r', '')
-    # 显示内容中把换行替换为空格，防止行高增加
-    display_str = html.escape(value_str.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' '))
-    return f'<span title="{title_str}">{display_str}</span>'
-
-
-_tbl_uid_counter = [0]
-
-
-def estimate_col_width(title, values, min_width=60, max_width=180, char_px=8, padding=32):
-    """Estimate initial column width based on the longest value in title and data."""
-    max_len = max(
-        [len(str(title))] + [len(str(v)) for v in values if pd.notna(v)],
-        default=len(str(title))
-    )
-    return max(min_width, min(max_width, max_len * char_px + padding))
-
-
-def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
-    _tbl_uid_counter[0] += 1
-    table_uid = f"rt{_tbl_uid_counter[0]}"
-
-    # Columns whose initial width is estimated from content (with min/max bounds).
-    # Users can still drag-resize these after load.
-    ADAPTIVE_COLS = {
-        "序号":     (36,  70),
-        "得分":     (50,  90),
-        "开发者":   (60, 160),
-        "项目名称": (80, 200),
-        "更新时间": (120, 180),
-        "delta":    (60, 150),
-    }
-    # Fixed-width columns – content is clipped/ellipsed; never auto-stretched.
-    FIXED_WIDTH_MAP = {
-        "源分支":   160,
-        "目标分支": 160,
-        "分支":     160,
-    }
-    DEFAULT_COL_WIDTH = 220  # 提交信息 and other columns
-
-    header_to_col = dict(zip(headers, ordered_columns))
-
-    def col_width(title):
-        if title in ADAPTIVE_COLS:
-            min_w, max_w = ADAPTIVE_COLS[title]
-            col_name = header_to_col.get(title)
-            values = (
-                df[col_name].tolist()
-                if (col_name and col_name in df.columns and not df.empty)
-                else []
-            )
-            return estimate_col_width(title, values, min_width=min_w, max_width=max_w)
-        return FIXED_WIDTH_MAP.get(title, DEFAULT_COL_WIDTH)
-
-    # Index column: adaptive based on row count
-    idx_values = list(range(1, len(df) + 1))
-    idx_w = estimate_col_width("序号", idx_values, min_width=36, max_width=70)
-
-    col_tags = f'<col style="width:{idx_w}px;">'
-    col_tags += ''.join(
-        f'<col style="width:{col_width(t)}px;">'
-        for t in headers
-    )
-    total_width = idx_w + sum(col_width(t) for t in headers)
-
-    header_html = "".join(
-        f'<th>{html.escape(title)}<div class="resize-handle"></div></th>'
-        for title in headers
-    )
-    rows_html = []
-
-    for index, row in df.reset_index(drop=True).iterrows():
-        row_cells = [f'<td title="{index + 1}">{index + 1}</td>']
-        for col in ordered_columns:
-            value = row.get(col, "")
-            cell_style = ""
-            cell_content = build_tooltip_cell(value)
-            if col == score_column:
-                cell_color = get_score_color(value)
-                if cell_color:
-                    cell_style = f' style="background-color: {cell_color};"'
-                cell_content = build_score_link(value, row.get("url", "#"))
-            row_cells.append(f"<td{cell_style}>{cell_content}</td>")
-        rows_html.append(f"<tr>{''.join(row_cells)}</tr>")
-
-    # Inline script: runs immediately after the table is in the DOM.
-    # Uses closure-based listeners so there is no global state that could
-    # accumulate across Streamlit re-renders.
-    drag_script = f"""
-    <script>
-    (function() {{
-        var wrap = document.getElementById('{table_uid}');
-        if (!wrap) return;
-        var tbl = wrap.querySelector('.review-table');
-        if (!tbl) return;
-        var MIN_W = 40;
-        var ths = Array.from(tbl.querySelectorAll('thead tr th'));
-        var cols = Array.from(tbl.querySelectorAll('col'));
-        ths.forEach(function(th, i) {{
-            var handle = th.querySelector('.resize-handle');
-            if (!handle) return;
-            handle.addEventListener('mousedown', function(e) {{
-                var startX = e.clientX;
-                var startW = Math.round(th.getBoundingClientRect().width);
-                var startTW = Math.round(parseFloat(tbl.style.width) || tbl.getBoundingClientRect().width);
-                var col = cols[i] || null;
-                document.body.style.cursor = 'col-resize';
-                document.body.style.userSelect = 'none';
-                function onMove(ev) {{
-                    var newW = Math.max(MIN_W, startW + (ev.clientX - startX));
-                    if (col) {{
-                        col.style.width = newW + 'px';
-                        col.style.minWidth = newW + 'px';
-                    }}
-                    th.style.width = newW + 'px';
-                    tbl.style.width = (startTW + newW - startW) + 'px';
-                }}
-                function onUp() {{
-                    document.removeEventListener('mousemove', onMove);
-                    document.removeEventListener('mouseup', onUp);
-                    document.body.style.cursor = '';
-                    document.body.style.userSelect = '';
-                }}
-                document.addEventListener('mousemove', onMove);
-                document.addEventListener('mouseup', onUp);
-                e.preventDefault();
-                e.stopPropagation();
-            }});
-        }});
-    }})();
-    </script>"""
-
-    return f"""
-    <div class="review-table-wrapper" id="{table_uid}">
-        <table class="review-table" style="width:{total_width}px;">
-            <colgroup>{col_tags}</colgroup>
-            <thead>
-                <tr><th>序号<div class="resize-handle"></div></th>{header_html}</tr>
-            </thead>
-            <tbody>
-                {''.join(rows_html)}
-            </tbody>
-        </table>
-    </div>
-    {drag_script}
-    """
-
-
 # 获取数据函数
 def get_data(service_func, authors=None, project_names=None, updated_at_gte=None, updated_at_lte=None, columns=None):
     df = service_func(authors=authors, project_names=project_names, updated_at_gte=updated_at_gte,
@@ -483,66 +307,6 @@ st.markdown(
     }
     .pro-link-wrap .pro-link {
         max-width: 100%;
-    }
-    .review-table-wrapper {
-        overflow-x: auto;
-        overflow-y: auto;
-        margin-top: 1rem;
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        background: #fff;
-        max-height: 480px; /* ~10 rows: 10 × 44px per row + header */
-    }
-    .review-table-wrapper::-webkit-scrollbar {
-        width: 16px;
-        height: 16px;
-    }
-    .review-table-wrapper::-webkit-scrollbar-track {
-        background: #f1f3f5;
-        border-radius: 8px;
-    }
-    .review-table-wrapper::-webkit-scrollbar-thumb {
-        background: #b8c0cc;
-        border-radius: 8px;
-    }
-    .review-table-wrapper::-webkit-scrollbar-thumb:hover {
-        background: #98a2b3;
-    }
-    .review-table {
-        border-collapse: collapse;
-        table-layout: fixed;
-    }
-    .review-table thead th {
-        position: sticky;
-        top: 0;
-        background: #f8f9fb;
-        z-index: 1;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        user-select: none;
-    }
-    .review-table th,
-    .review-table td {
-        border: 1px solid #e5e7eb;
-        padding: 10px 12px;
-        text-align: left;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .resize-handle {
-        position: absolute;
-        top: 0;
-        right: 0;
-        width: 5px;
-        height: 100%;
-        cursor: col-resize;
-        background: transparent;
-        z-index: 2;
-    }
-    .resize-handle:hover {
-        background: rgba(0, 0, 0, 0.15);
     }
     </style>
     """,
@@ -807,9 +571,31 @@ def main_page():
             if df.empty:
                 st.info("没有数据可供展示")
             else:
-                st.markdown(
-                    build_indexed_html_table(df, ordered_columns, headers, score_column),
-                    unsafe_allow_html=True
+                # Build display dataframe with renamed columns and a "序号" index column
+                display_df = df[ordered_columns].copy()
+                display_df.insert(0, "序号", range(1, len(display_df) + 1))
+                col_rename = dict(zip(ordered_columns, headers))
+                display_df = display_df.rename(columns=col_rename)
+
+                # Format score column with emoji
+                score_header = headers[ordered_columns.index(score_column)] if score_column in ordered_columns else None
+                if score_header and score_header in display_df.columns:
+                    display_df[score_header] = display_df[score_header].apply(
+                        lambda s: f"{get_score_emoji(s)} {s:.0f}" if pd.notna(s) and s != "" else ""
+                    )
+
+                # Add URL column as a clickable link when available
+                col_config = {}
+                if "url" in df.columns:
+                    display_df["详情"] = df["url"].values
+                    col_config["详情"] = st.column_config.LinkColumn("详情", display_text="查看详情")
+
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=col_config,
+                    height=400,
                 )
 
             total_records = len(df)
