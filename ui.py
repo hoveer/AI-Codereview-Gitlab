@@ -208,11 +208,21 @@ def build_tooltip_cell(value):
     if pd.isna(value):
         return ""
     value_str = str(value)
-    escaped = html.escape(value_str)
-    return f'<div title="{escaped}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{escaped}</div>'
+    # title tooltip 中用 &#10; 编码换行，避免属性值中出现裸换行
+    title_str = html.escape(value_str, quote=True).replace('\n', '&#10;').replace('\r', '')
+    # 显示内容中把换行替换为空格，防止行高增加
+    display_str = html.escape(value_str.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' '))
+    return f'<div title="{title_str}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{display_str}</div>'
 
 
 def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
+    idx_col_width = 36
+    data_col_width = 150
+    col_tags = f'<col style="width:{idx_col_width}px;min-width:{idx_col_width}px;">'
+    col_tags += ''.join(
+        f'<col style="width:{data_col_width}px;min-width:60px;">' for _ in headers
+    )
+
     header_html = "".join(
         f'<th>{html.escape(title)}<div class="resize-handle"></div></th>'
         for title in headers
@@ -236,6 +246,7 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
     return f"""
     <div class="review-table-wrapper">
         <table class="review-table">
+            <colgroup>{col_tags}</colgroup>
             <thead>
                 <tr><th>序号<div class="resize-handle"></div></th>{header_html}</tr>
             </thead>
@@ -399,7 +410,7 @@ st.markdown(
         background: #98a2b3;
     }
     .review-table {
-        width: 100%;
+        min-width: 100%;
         border-collapse: collapse;
         table-layout: fixed;
     }
@@ -413,12 +424,17 @@ st.markdown(
         text-overflow: ellipsis;
         user-select: none;
     }
+    .review-table th:first-child,
+    .review-table td:first-child {
+        width: 36px;
+        min-width: 36px;
+        max-width: 36px;
+    }
     .review-table th,
     .review-table td {
         border: 1px solid #e5e7eb;
         padding: 10px 12px;
         text-align: left;
-        max-width: 220px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -440,11 +456,13 @@ st.markdown(
     <script>
     (function() {
         var MIN_COL_WIDTH = 40;
-        var _rs = {active: false, startX: 0, startW: 0, th: null};
+        var _rs = {active: false, startX: 0, startW: 0, th: null, col: null};
         function initTable(table) {
             if (table.dataset.resizeReady) return;
             table.dataset.resizeReady = '1';
-            table.querySelectorAll('thead th').forEach(function(th) {
+            var ths = Array.from(table.querySelectorAll('thead th'));
+            var cols = Array.from(table.querySelectorAll('col'));
+            ths.forEach(function(th, i) {
                 var handle = th.querySelector('.resize-handle');
                 if (!handle) return;
                 handle.addEventListener('mousedown', function(e) {
@@ -452,6 +470,7 @@ st.markdown(
                     _rs.startX = e.clientX;
                     _rs.startW = th.getBoundingClientRect().width;
                     _rs.th = th;
+                    _rs.col = cols[i] || null;
                     document.body.style.cursor = 'col-resize';
                     document.body.style.userSelect = 'none';
                     e.preventDefault();
@@ -465,11 +484,16 @@ st.markdown(
             _rs.th.style.width = newW + 'px';
             _rs.th.style.minWidth = newW + 'px';
             _rs.th.style.maxWidth = newW + 'px';
+            if (_rs.col) {
+                _rs.col.style.width = newW + 'px';
+                _rs.col.style.minWidth = newW + 'px';
+            }
         });
         document.addEventListener('mouseup', function() {
             if (_rs.active) {
                 _rs.active = false;
                 _rs.th = null;
+                _rs.col = null;
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
             }
