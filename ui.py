@@ -215,33 +215,64 @@ def build_tooltip_cell(value):
     return f'<span title="{title_str}">{display_str}</span>'
 
 
+_tbl_uid_counter = [0]
+
+
+def estimate_col_width(title, values, min_width=60, max_width=180, char_px=8, padding=32):
+    """Estimate initial column width based on the longest value in title and data."""
+    max_len = max(
+        [len(str(title))] + [len(str(v)) for v in values if pd.notna(v)],
+        default=len(str(title))
+    )
+    return max(min_width, min(max_width, max_len * char_px + padding))
+
+
 def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
-    # 列名 -> 初始宽度映射（单位 px）
-    COL_WIDTH_MAP = {
-        "序号": 40,
-        "得分": 60,
-        "开发者": 90,
-        "项目名称": 110,
-        "更新时间": 150,
-        "delta": 90,
-        "源分支": 160,
-        "目标分支": 160,
-        "分支": 160,
+    _tbl_uid_counter[0] += 1
+    table_uid = f"rt{_tbl_uid_counter[0]}"
+
+    # Columns whose initial width is estimated from content (with min/max bounds).
+    # Users can still drag-resize these after load.
+    ADAPTIVE_COLS = {
+        "序号":     (36,  70),
+        "得分":     (50,  90),
+        "开发者":   (60, 160),
+        "项目名称": (80, 200),
+        "更新时间": (120, 180),
+        "delta":    (60, 150),
     }
-    DEFAULT_COL_WIDTH = 220  # 提交信息等其他列
+    # Fixed-width columns – content is clipped/ellipsed; never auto-stretched.
+    FIXED_WIDTH_MAP = {
+        "源分支":   160,
+        "目标分支": 160,
+        "分支":     160,
+    }
+    DEFAULT_COL_WIDTH = 220  # 提交信息 and other columns
+
+    header_to_col = dict(zip(headers, ordered_columns))
 
     def col_width(title):
-        return COL_WIDTH_MAP.get(title, DEFAULT_COL_WIDTH)
+        if title in ADAPTIVE_COLS:
+            min_w, max_w = ADAPTIVE_COLS[title]
+            col_name = header_to_col.get(title)
+            values = (
+                df[col_name].tolist()
+                if (col_name and col_name in df.columns and not df.empty)
+                else []
+            )
+            return estimate_col_width(title, values, min_width=min_w, max_width=max_w)
+        return FIXED_WIDTH_MAP.get(title, DEFAULT_COL_WIDTH)
 
-    idx_w = COL_WIDTH_MAP.get("序号", DEFAULT_COL_WIDTH)
+    # Index column: adaptive based on row count
+    idx_values = list(range(1, len(df) + 1))
+    idx_w = estimate_col_width("序号", idx_values, min_width=36, max_width=70)
+
     col_tags = f'<col style="width:{idx_w}px;">'
     col_tags += ''.join(
         f'<col style="width:{col_width(t)}px;">'
         for t in headers
     )
     total_width = idx_w + sum(col_width(t) for t in headers)
-    # table-layout: fixed requires an explicit width on the table element to enforce
-    # column widths from <col>; without it browsers may fall back to auto-layout.
 
     header_html = "".join(
         f'<th>{html.escape(title)}<div class="resize-handle"></div></th>'
@@ -263,8 +294,55 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
             row_cells.append(f"<td{cell_style}>{cell_content}</td>")
         rows_html.append(f"<tr>{''.join(row_cells)}</tr>")
 
+    # Inline script: runs immediately after the table is in the DOM.
+    # Uses closure-based listeners so there is no global state that could
+    # accumulate across Streamlit re-renders.
+    drag_script = f"""
+    <script>
+    (function() {{
+        var wrap = document.getElementById('{table_uid}');
+        if (!wrap) return;
+        var tbl = wrap.querySelector('.review-table');
+        if (!tbl) return;
+        var MIN_W = 40;
+        var ths = Array.from(tbl.querySelectorAll('thead tr th'));
+        var cols = Array.from(tbl.querySelectorAll('col'));
+        ths.forEach(function(th, i) {{
+            var handle = th.querySelector('.resize-handle');
+            if (!handle) return;
+            handle.addEventListener('mousedown', function(e) {{
+                var startX = e.clientX;
+                var startW = th.getBoundingClientRect().width;
+                var startTW = parseFloat(tbl.style.width) || tbl.getBoundingClientRect().width;
+                var col = cols[i] || null;
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                function onMove(ev) {{
+                    var newW = Math.max(MIN_W, startW + (ev.clientX - startX));
+                    if (col) {{
+                        col.style.width = newW + 'px';
+                        col.style.minWidth = newW + 'px';
+                    }}
+                    th.style.width = newW + 'px';
+                    tbl.style.width = (startTW + newW - startW) + 'px';
+                }}
+                function onUp() {{
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                }}
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                e.preventDefault();
+                e.stopPropagation();
+            }});
+        }});
+    }})();
+    </script>"""
+
     return f"""
-    <div class="review-table-wrapper">
+    <div class="review-table-wrapper" id="{table_uid}">
         <table class="review-table" style="width:{total_width}px;">
             <colgroup>{col_tags}</colgroup>
             <thead>
@@ -275,6 +353,7 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
             </tbody>
         </table>
     </div>
+    {drag_script}
     """
 
 
@@ -466,60 +545,6 @@ st.markdown(
         background: rgba(0, 0, 0, 0.15);
     }
     </style>
-    <script>
-    (function() {
-        var MIN_COL_WIDTH = 40;
-        var _rs = {active: false, startX: 0, startW: 0, startTableW: 0, th: null, col: null, table: null};
-        function initTable(table) {
-            if (table.dataset.resizeReady) return;
-            table.dataset.resizeReady = '1';
-            var ths = Array.from(table.querySelectorAll('thead th'));
-            var cols = Array.from(table.querySelectorAll('col'));
-            ths.forEach(function(th, i) {
-                var handle = th.querySelector('.resize-handle');
-                if (!handle) return;
-                handle.addEventListener('mousedown', function(e) {
-                    _rs.active = true;
-                    _rs.startX = e.clientX;
-                    _rs.startW = th.getBoundingClientRect().width;
-                    _rs.startTableW = parseFloat(table.style.width) || table.getBoundingClientRect().width;
-                    _rs.th = th;
-                    _rs.col = cols[i] || null;
-                    _rs.table = table;
-                    document.body.style.cursor = 'col-resize';
-                    document.body.style.userSelect = 'none';
-                    e.preventDefault();
-                    e.stopPropagation();
-                });
-            });
-        }
-        document.addEventListener('mousemove', function(e) {
-            if (!_rs.active || !_rs.th) return;
-            var newW = Math.max(MIN_COL_WIDTH, _rs.startW + (e.clientX - _rs.startX));
-            if (_rs.col) {
-                _rs.col.style.width = newW + 'px';
-            }
-            if (_rs.table) {
-                _rs.table.style.width = (_rs.startTableW + newW - _rs.startW) + 'px';
-            }
-        });
-        document.addEventListener('mouseup', function() {
-            if (_rs.active) {
-                _rs.active = false;
-                _rs.th = null;
-                _rs.col = null;
-                _rs.table = null;
-                document.body.style.cursor = '';
-                document.body.style.userSelect = '';
-            }
-        });
-        var _obs = new MutationObserver(function() {
-            document.querySelectorAll('.review-table').forEach(initTable);
-        });
-        _obs.observe(document.body, {childList: true, subtree: true});
-        document.querySelectorAll('.review-table').forEach(initTable);
-    })();
-    </script>
     """,
     unsafe_allow_html=True
 )
