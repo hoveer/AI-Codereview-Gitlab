@@ -192,12 +192,16 @@ def get_score_color(score):
     return ""
 
 
-def build_score_link(score, url):
+def build_score_link(score, url=None):
     score_text = "" if pd.isna(score) else f"{float(score):.0f}"
     emoji = get_score_emoji(score)
     display_text = f"{emoji} {score_text}".strip() or "查看详情"
     safe_text = html.escape(display_text)
-    safe_url = html.escape(str(url) if pd.notna(url) else "#", quote=True)
+    # Only wrap in a hyperlink when a real URL is available
+    url_str = "" if (url is None or pd.isna(url)) else str(url).strip()
+    if not url_str or url_str == "#":
+        return f'<span style="font-weight:600;">{safe_text}</span>'
+    safe_url = html.escape(url_str, quote=True)
     return (
         f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer" '
         f'style="text-decoration:none;color:inherit;font-weight:600;">{safe_text}</a>'
@@ -290,7 +294,7 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
                 cell_color = get_score_color(value)
                 if cell_color:
                     cell_style = f' style="background-color: {cell_color};"'
-                cell_content = build_score_link(value, row.get("url", "#"))
+                cell_content = build_score_link(value, row.get("url"))
             row_cells.append(f"<td{cell_style}>{cell_content}</td>")
         rows_html.append(f"<tr>{''.join(row_cells)}</tr>")
 
