@@ -212,7 +212,7 @@ def build_tooltip_cell(value):
     title_str = html.escape(value_str, quote=True).replace('\n', '&#10;').replace('\r', '')
     # 显示内容中把换行替换为空格，防止行高增加
     display_str = html.escape(value_str.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' '))
-    return f'<div title="{title_str}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{display_str}</div>'
+    return f'<span title="{title_str}">{display_str}</span>'
 
 
 def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
@@ -234,11 +234,14 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
         return COL_WIDTH_MAP.get(title, DEFAULT_COL_WIDTH)
 
     idx_w = COL_WIDTH_MAP.get("序号", DEFAULT_COL_WIDTH)
-    col_tags = f'<col style="width:{idx_w}px;min-width:{idx_w}px;">'
+    col_tags = f'<col style="width:{idx_w}px;">'
     col_tags += ''.join(
-        f'<col style="width:{col_width(t)}px;min-width:40px;">'
+        f'<col style="width:{col_width(t)}px;">'
         for t in headers
     )
+    total_width = idx_w + sum(col_width(t) for t in headers)
+    # table-layout: fixed requires an explicit width on the table element to enforce
+    # column widths from <col>; without it browsers may fall back to auto-layout.
 
     header_html = "".join(
         f'<th>{html.escape(title)}<div class="resize-handle"></div></th>'
@@ -262,7 +265,7 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
 
     return f"""
     <div class="review-table-wrapper">
-        <table class="review-table">
+        <table class="review-table" style="width:{total_width}px;">
             <colgroup>{col_tags}</colgroup>
             <thead>
                 <tr><th>序号<div class="resize-handle"></div></th>{header_html}</tr>
@@ -427,7 +430,6 @@ st.markdown(
         background: #98a2b3;
     }
     .review-table {
-        min-width: 100%;
         border-collapse: collapse;
         table-layout: fixed;
     }
@@ -467,7 +469,7 @@ st.markdown(
     <script>
     (function() {
         var MIN_COL_WIDTH = 40;
-        var _rs = {active: false, startX: 0, startW: 0, th: null, col: null};
+        var _rs = {active: false, startX: 0, startW: 0, startTableW: 0, th: null, col: null, table: null};
         function initTable(table) {
             if (table.dataset.resizeReady) return;
             table.dataset.resizeReady = '1';
@@ -480,8 +482,10 @@ st.markdown(
                     _rs.active = true;
                     _rs.startX = e.clientX;
                     _rs.startW = th.getBoundingClientRect().width;
+                    _rs.startTableW = parseFloat(table.style.width) || table.getBoundingClientRect().width;
                     _rs.th = th;
                     _rs.col = cols[i] || null;
+                    _rs.table = table;
                     document.body.style.cursor = 'col-resize';
                     document.body.style.userSelect = 'none';
                     e.preventDefault();
@@ -492,12 +496,11 @@ st.markdown(
         document.addEventListener('mousemove', function(e) {
             if (!_rs.active || !_rs.th) return;
             var newW = Math.max(MIN_COL_WIDTH, _rs.startW + (e.clientX - _rs.startX));
-            _rs.th.style.width = newW + 'px';
-            _rs.th.style.minWidth = newW + 'px';
-            _rs.th.style.maxWidth = newW + 'px';
             if (_rs.col) {
                 _rs.col.style.width = newW + 'px';
-                _rs.col.style.minWidth = newW + 'px';
+            }
+            if (_rs.table) {
+                _rs.table.style.width = (_rs.startTableW + newW - _rs.startW) + 'px';
             }
         });
         document.addEventListener('mouseup', function() {
@@ -505,6 +508,7 @@ st.markdown(
                 _rs.active = false;
                 _rs.th = null;
                 _rs.col = null;
+                _rs.table = null;
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
             }
@@ -594,6 +598,8 @@ def generate_project_score_chart(df):
     # 计算每个项目的平均分数
     project_scores = df.groupby('project_name')['score'].mean().reset_index()
     project_scores.columns = ['project_name', 'average_score']
+    # 按平均分数从高到低排序（从左到右）
+    project_scores = project_scores.sort_values('average_score', ascending=False).reset_index(drop=True)
 
     # 生成颜色列表，每个项目一个颜色
     # colors = plt.cm.get_cmap('Accent', len(project_scores))  # 使用'tab20'颜色映射，适合分类数据
