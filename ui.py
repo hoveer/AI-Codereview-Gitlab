@@ -312,8 +312,8 @@ def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
             if (!handle) return;
             handle.addEventListener('mousedown', function(e) {{
                 var startX = e.clientX;
-                var startW = th.getBoundingClientRect().width;
-                var startTW = parseFloat(tbl.style.width) || tbl.getBoundingClientRect().width;
+                var startW = Math.round(th.getBoundingClientRect().width);
+                var startTW = Math.round(parseFloat(tbl.style.width) || tbl.getBoundingClientRect().width);
                 var col = cols[i] || null;
                 document.body.style.cursor = 'col-resize';
                 document.body.style.userSelect = 'none';
