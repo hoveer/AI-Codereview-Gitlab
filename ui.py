@@ -216,11 +216,28 @@ def build_tooltip_cell(value):
 
 
 def build_indexed_html_table(df, ordered_columns, headers, score_column=None):
-    idx_col_width = 36
-    data_col_width = 150
-    col_tags = f'<col style="width:{idx_col_width}px;min-width:{idx_col_width}px;">'
+    # 列名 -> 初始宽度映射（单位 px）
+    COL_WIDTH_MAP = {
+        "序号": 40,
+        "得分": 60,
+        "开发者": 90,
+        "项目名称": 110,
+        "更新时间": 150,
+        "delta": 90,
+        "源分支": 160,
+        "目标分支": 160,
+        "分支": 160,
+    }
+    DEFAULT_COL_WIDTH = 220  # 提交信息等其他列
+
+    def col_width(title):
+        return COL_WIDTH_MAP.get(title, DEFAULT_COL_WIDTH)
+
+    idx_w = COL_WIDTH_MAP.get("序号", DEFAULT_COL_WIDTH)
+    col_tags = f'<col style="width:{idx_w}px;min-width:{idx_w}px;">'
     col_tags += ''.join(
-        f'<col style="width:{data_col_width}px;min-width:60px;">' for _ in headers
+        f'<col style="width:{col_width(t)}px;min-width:40px;">'
+        for t in headers
     )
 
     header_html = "".join(
@@ -423,12 +440,6 @@ st.markdown(
         overflow: hidden;
         text-overflow: ellipsis;
         user-select: none;
-    }
-    .review-table th:first-child,
-    .review-table td:first-child {
-        width: 36px;
-        min-width: 36px;
-        max-width: 36px;
     }
     .review-table th,
     .review-table td {
