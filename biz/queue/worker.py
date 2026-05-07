@@ -304,7 +304,7 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             change_filter_fn=filter_changes,
         )
         if not changes:
-            logger.info('MR变更仅包含从主干合入/rebase带入且已存在于主干的代码，无需审核。')
+            logger.info('MR变更仅包含从主干合入/变基带入且已存在于主干的代码，无需审核。')
             return
 
         # 统计本次新增、删除的代码总数
@@ -542,7 +542,7 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             )
             if not changes:
                 logger.info('Note event review: 未检测到有关代码的修改。')
-                handler.add_merge_request_note('关注的文件没有修改，或仅包含从主干合入/rebase带入且已存在于主干的代码，无需 Review。')
+                handler.add_merge_request_note('关注的文件没有修改，或仅包含从主干合入/变基带入且已存在于主干的代码，无需 Review。')
                 return
 
             commits_text = _build_review_commits_text(
