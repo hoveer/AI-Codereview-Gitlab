@@ -12,6 +12,7 @@ from biz.service.review_service import ReviewService
 from biz.utils.code_reviewer import CodeReviewer, MrChatReviewer
 from biz.utils.im import notifier
 from biz.utils.log import logger
+from biz.utils.review_filter import filter_out_mainline_changes
 
 _INCREMENTAL_REVIEW_PREFIX = "[增量审查：本次仅包含自上次审核以来的新增提交] "
 _LOW_SCORE_BLOCK_DEFAULT_THRESHOLD = 60
@@ -281,6 +282,17 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
                 logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
                 return
 
+        changes = filter_out_mainline_changes(
+            changes,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            compare_fn=handler.repository_compare,
+            change_filter_fn=filter_changes,
+        )
+        if not changes:
+            logger.info('MR变更仅包含从主干合入/rebase带入且已存在于主干的代码，无需审核。')
+            return
+
         # 统计本次新增、删除的代码总数
         additions = sum(item.get('additions', 0) for item in changes)
         deletions = sum(item.get('deletions', 0) for item in changes)
@@ -490,9 +502,16 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             if not is_incremental:
                 changes = filter_changes(handler.get_merge_request_changes())
 
+            changes = filter_out_mainline_changes(
+                changes,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                compare_fn=handler.repository_compare,
+                change_filter_fn=filter_changes,
+            )
             if not changes:
                 logger.info('Note event review: 未检测到有关代码的修改。')
-                handler.add_merge_request_note('关注的文件没有修改，无需 Review。')
+                handler.add_merge_request_note('关注的文件没有修改，或仅包含从主干合入/rebase带入且已存在于主干的代码，无需 Review。')
                 return
 
             commits = handler.get_merge_request_commits()
@@ -670,6 +689,13 @@ def handle_github_pull_request_event(webhook_data: dict, github_token: str, gith
         changes = handler.get_pull_request_changes()
         logger.info('changes: %s', changes)
         changes = filter_github_changes(changes)
+        changes = filter_out_mainline_changes(
+            changes,
+            source_branch=webhook_data['pull_request']['head']['ref'],
+            target_branch=webhook_data['pull_request']['base']['ref'],
+            compare_fn=handler.repository_compare,
+            change_filter_fn=filter_github_changes,
+        )
         if not changes:
             logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
             return

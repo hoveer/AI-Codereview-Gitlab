@@ -68,6 +68,9 @@ DEEPSEEK_API_KEY={YOUR_DEEPSEEK_API_KEY}
 #支持review的文件类型(未配置的文件类型不会被审查)
 SUPPORTED_EXTENSIONS=.java,.py,.php,.yml,.vue,.go,.c,.cpp,.h,.js,.css,.md,.sql
 
+# 是否忽略从 main/master 合入或 rebase 带入、且已在主干可识别的代码（默认关闭）
+IGNORE_MAINLINE_MERGE_REBASE_CHANGES_ENABLED=0
+
 #钉钉消息推送: 0不发送钉钉消息,1发送钉钉消息
 DINGTALK_ENABLED=0
 DINGTALK_WEBHOOK_URL={YOUR_WDINGTALK_WEBHOOK_URL}
