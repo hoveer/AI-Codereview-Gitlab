@@ -12,7 +12,7 @@ from biz.service.review_service import ReviewService
 from biz.utils.code_reviewer import CodeReviewer, MrChatReviewer
 from biz.utils.im import notifier
 from biz.utils.log import logger
-from biz.utils.review_filter import filter_out_mainline_changes
+from biz.utils.review_filter import filter_out_mainline_changes, filter_out_mainline_sync_commits, is_mainline_sync_commit
 
 _INCREMENTAL_REVIEW_PREFIX = "[增量审查：本次仅包含自上次审核以来的新增提交] "
 _LOW_SCORE_BLOCK_DEFAULT_THRESHOLD = 60
@@ -123,6 +123,27 @@ def _try_block_mr_if_low_score(handler: MergeRequestHandler, review_result: str)
         logger.error(f"Low-score block: failed to create blocking discussion: {e}")
 
 
+def _get_new_commits_since_last_review(commits: list, last_reviewed_commit_id: str) -> list:
+    if not commits or not last_reviewed_commit_id:
+        return []
+    commit_ids = [commit.get('id') for commit in commits]
+    if last_reviewed_commit_id not in commit_ids:
+        return []
+    return commits[:commit_ids.index(last_reviewed_commit_id)]
+
+
+def _build_review_commits_text(commits: list, *, source_branch: str, target_branch: str, is_incremental: bool = False) -> str:
+    filtered_commits = filter_out_mainline_sync_commits(
+        commits,
+        source_branch=source_branch,
+        target_branch=target_branch,
+    )
+    commits_text = ';'.join(commit.get('message', '').strip() for commit in filtered_commits if commit.get('message'))
+    if is_incremental and commits_text:
+        commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
+    return commits_text
+
+
 def handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gitlab_url_slug: str):
     push_review_enabled = os.environ.get('PUSH_REVIEW_ENABLED', '0') == '1'
     try:
@@ -231,32 +252,25 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
             logger.error('Failed to get commits')
             return
 
-        # 过滤合并提交（merge commits），合并提交的 parent_ids 长度大于 1
-        # 合并提交是将其他分支合入当前分支产生的提交，其代码变更通常已在相应分支的审查中处理过
-        non_merge_commits = [c for c in commits if len(c.get('parent_ids', [])) <= 1]
-
         # 尝试增量审核：获取上次审核的 commit id，若存在则只审核新增部分
         is_incremental = False
         changes = None
         prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch, target_branch,
                                                                      mr_iid=mr_iid)
         if prev_commit_id and last_commit_id and prev_commit_id != last_commit_id:
-            # 检测自上次审核以来的新提交是否全部为合并提交（合入其他分支的操作）
-            # 若是，则这些变更已在源分支的推送审查或其他 MR 审查中处理过，跳过本次审查以避免重复审核
-            commit_ids = [c.get('id') for c in commits]
-            if prev_commit_id in commit_ids:
-                prev_idx = commit_ids.index(prev_commit_id)
-                # GitLab 按最新在前排序；commits[:prev_idx] 取比 prev_commit_id 更新的提交。
-                # 因 prev_commit_id != last_commit_id（上方已过滤），prev_idx 不会为 0。
-                new_commits_since_last_review = commits[:prev_idx]
-                if new_commits_since_last_review and all(
-                    len(c.get('parent_ids', [])) > 1 for c in new_commits_since_last_review
-                ):
-                    logger.info(
-                        "All new commits since last review are merge commits (merging other branches), "
-                        "skipping review to avoid duplicate review of already-reviewed code."
-                    )
-                    return
+            new_commits_since_last_review = _get_new_commits_since_last_review(commits, prev_commit_id)
+            if new_commits_since_last_review and all(
+                is_mainline_sync_commit(
+                    commit,
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                ) for commit in new_commits_since_last_review
+            ):
+                logger.info(
+                    "All new commits since last review are mainline sync commits, "
+                    "skipping review to avoid duplicate review of mainline code."
+                )
+                return
             try:
                 incremental_diffs = handler.repository_compare(prev_commit_id, last_commit_id)
                 if incremental_diffs:
@@ -297,12 +311,13 @@ def handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_url
         additions = sum(item.get('additions', 0) for item in changes)
         deletions = sum(item.get('deletions', 0) for item in changes)
 
-        # review 代码 - 使用非合并提交的消息作为上下文，过滤掉"Merge branch X into Y"等无实际意义的提交
-        # 若所有提交均为合并提交（极罕见场景），则退回使用全量 commits，保证上下文不为空
-        commits_for_context = non_merge_commits if non_merge_commits else commits
-        commits_text = ';'.join(commit.get('message', '').strip() for commit in commits_for_context)
-        if is_incremental:
-            commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
+        # review 代码 - 过滤掉"Merge branch 'main' into X"等主干同步提交，避免 AI 误判提交信息质量
+        commits_text = _build_review_commits_text(
+            commits,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            is_incremental=is_incremental,
+        )
 
         # 创建占位评论 → AI 审核 → 编辑为正式结果（统一生命周期）
         note_for_emoji, review_result = _run_ai_with_placeholder(
@@ -439,7 +454,11 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             changes = handler.get_merge_request_changes()
             changes = filter_changes(changes)
             commits = handler.get_merge_request_commits()
-            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            commits_text = _build_review_commits_text(
+                commits,
+                source_branch=handler.source_branch,
+                target_branch=handler.target_branch,
+            )
             diffs_text = str(changes) if changes else ''
             _run_ai_with_placeholder(
                 create_note_fn=handler.create_mr_note,
@@ -466,6 +485,7 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             current_commit_id = handler.last_commit_id
             mr_iid = handler.merge_request_iid  # GitLab per-project MR IID
             mr_ident_available = bool(current_commit_id and project_name and source_branch and target_branch)
+            commits = handler.get_merge_request_commits()
 
             # 如果当前 commit 已经审核过，提示无新增改动
             if mr_ident_available:
@@ -482,6 +502,17 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                 prev_commit_id = ReviewService.get_last_mr_review_commit_id(project_name, source_branch,
                                                                              target_branch, mr_iid=mr_iid)
                 if prev_commit_id and prev_commit_id != current_commit_id:
+                    new_commits_since_last_review = _get_new_commits_since_last_review(commits, prev_commit_id)
+                    if new_commits_since_last_review and all(
+                        is_mainline_sync_commit(
+                            commit,
+                            source_branch=source_branch,
+                            target_branch=target_branch,
+                        ) for commit in new_commits_since_last_review
+                    ):
+                        logger.info("Note event incremental review: only mainline sync commits were added, skipping review.")
+                        handler.add_merge_request_note('当前 MR 自上次审核后仅合入了 main/master 的同步提交，无需重复审核。')
+                        return
                     try:
                         incremental_diffs = handler.repository_compare(prev_commit_id, current_commit_id)
                         if incremental_diffs:
@@ -514,10 +545,12 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
                 handler.add_merge_request_note('关注的文件没有修改，或仅包含从主干合入/rebase带入且已存在于主干的代码，无需 Review。')
                 return
 
-            commits = handler.get_merge_request_commits()
-            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
-            if is_incremental:
-                commits_text = _INCREMENTAL_REVIEW_PREFIX + commits_text
+            commits_text = _build_review_commits_text(
+                commits,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                is_incremental=is_incremental,
+            )
 
             # 创建占位评论 → AI 审核 → 编辑为正式结果（统一生命周期）
             note_for_emoji, review_result = _run_ai_with_placeholder(
@@ -573,7 +606,11 @@ def handle_note_event(webhook_data: dict, gitlab_token: str, gitlab_url: str, gi
             changes = handler.get_merge_request_changes()
             changes = filter_changes(changes)
             commits = handler.get_merge_request_commits()
-            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+            commits_text = _build_review_commits_text(
+                commits,
+                source_branch=handler.source_branch,
+                target_branch=handler.target_branch,
+            )
             diffs_text = str(changes) if changes else ''
 
             _run_ai_with_placeholder(

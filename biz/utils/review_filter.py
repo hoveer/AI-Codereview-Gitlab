@@ -63,6 +63,70 @@ def _count_diff_changes(diff_text: str) -> Tuple[int, int]:
     return additions, deletions
 
 
+def _normalize_branch_name(branch_name: str) -> str:
+    if not branch_name:
+        return ''
+    normalized = branch_name.strip().strip('\'"')
+    for prefix in ('refs/heads/', 'refs/remotes/', 'origin/'):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+    return normalized.lower()
+
+
+def is_mainline_sync_commit(
+        commit: dict,
+        *,
+        source_branch: str = '',
+        target_branch: str = '',
+        mainline_branches: Tuple[str, ...] = DEFAULT_MAINLINE_BRANCHES,
+) -> bool:
+    title = str(commit.get('title', '') or '')
+    message = str(commit.get('message', '') or '')
+    text = f'{title}\n{message}'
+    if not text.strip():
+        return False
+
+    mainline_branch_names = {_normalize_branch_name(branch) for branch in mainline_branches if branch}
+    source_branch_name = _normalize_branch_name(source_branch)
+    target_branch_name = _normalize_branch_name(target_branch)
+
+    for merged_branch, into_branch in re.findall(
+            r"merge\s+(?:remote-tracking\s+)?branch\s+'([^']+)'\s+into\s+'?([^'\n]+)'?",
+            text,
+            flags=re.IGNORECASE,
+    ):
+        merged_branch_name = _normalize_branch_name(merged_branch)
+        into_branch_name = _normalize_branch_name(into_branch)
+        if merged_branch_name not in mainline_branch_names:
+            continue
+        if source_branch_name and into_branch_name == source_branch_name:
+            return True
+        if target_branch_name and into_branch_name == target_branch_name:
+            return False
+        if into_branch_name and into_branch_name not in mainline_branch_names:
+            return True
+
+    return False
+
+
+def filter_out_mainline_sync_commits(
+        commits: Iterable[dict],
+        *,
+        source_branch: str = '',
+        target_branch: str = '',
+        mainline_branches: Tuple[str, ...] = DEFAULT_MAINLINE_BRANCHES,
+) -> List[dict]:
+    return [
+        commit for commit in commits
+        if not is_mainline_sync_commit(
+            commit,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            mainline_branches=mainline_branches,
+        )
+    ]
+
+
 def _build_mainline_hunk_index(mainline_changes: Iterable[dict]) -> Dict[str, set]:
     hunks_by_path: Dict[str, set] = defaultdict(set)
     for change in mainline_changes:

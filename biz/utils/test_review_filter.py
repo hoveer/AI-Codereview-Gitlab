@@ -3,7 +3,9 @@ from unittest.mock import Mock, patch
 
 from biz.utils.review_filter import (
     IGNORE_MAINLINE_MERGE_REBASE_CHANGES_ENABLED,
+    filter_out_mainline_sync_commits,
     filter_out_mainline_changes,
+    is_mainline_sync_commit,
 )
 
 
@@ -101,3 +103,42 @@ class TestReviewFilter(TestCase):
         self.assertEqual(result[0]['diff'], '@@ -20 +20 @@\n-legacy\n+feature')
         self.assertEqual(result[0]['additions'], 1)
         self.assertEqual(result[0]['deletions'], 1)
+
+    def test_mainline_sync_commit_detected_from_message_when_parent_ids_missing(self):
+        commit = {
+            'parent_ids': [],
+            'title': "Merge branch 'main' into feature/demo",
+            'message': "Merge branch 'main' into feature/demo\n",
+        }
+
+        self.assertTrue(is_mainline_sync_commit(commit, source_branch='feature/demo', target_branch='main'))
+
+    def test_mainline_sync_commit_filter_keeps_feature_commit(self):
+        commits = [
+            {
+                'id': 'merge-main',
+                'title': "Merge branch 'main' into feature/demo",
+                'message': "Merge branch 'main' into feature/demo\n",
+            },
+            {
+                'id': 'feature-change',
+                'title': 'feat: update review flow',
+                'message': 'feat: update review flow\n',
+            },
+        ]
+
+        filtered = filter_out_mainline_sync_commits(
+            commits,
+            source_branch='feature/demo',
+            target_branch='main',
+        )
+
+        self.assertEqual([commit['id'] for commit in filtered], ['feature-change'])
+
+    def test_merge_into_main_is_not_mistaken_for_mainline_sync_commit(self):
+        commit = {
+            'title': "Merge branch 'feature/demo' into 'main'",
+            'message': "Merge branch 'feature/demo' into 'main'\n",
+        }
+
+        self.assertFalse(is_mainline_sync_commit(commit, source_branch='feature/demo', target_branch='main'))
